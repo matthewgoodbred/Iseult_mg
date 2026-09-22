@@ -13,6 +13,7 @@ import matplotlib.patheffects as PathEffects
 import matplotlib.transforms as mtransforms
 import streamlines
 import vector_arrows
+import plot_axes
 
 class FieldsPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -81,6 +82,7 @@ class FieldsPanel:
 
     streamlines.add_streamline_params(plot_param_dict)
     vector_arrows.add_vector_params(plot_param_dict)
+    plot_axes.add_axis_params(plot_param_dict)
 
     gradient =  np.linspace(0, 1, 256)# A way to make the colorbar display better
     gradient = np.vstack((gradient, gradient))
@@ -496,82 +498,25 @@ class FieldsPanel:
 
         # Now that the data is loaded, start making the plots
         if self.GetPlotParam('twoD'):
-            if self.parent.MainParamDict['LinkSpatial'] != 0:
-                # Need to be smart about sharing axes. If we are in the y-z plane, and the other plot
-                # is not 2D, then we shouldn't share the x-axis (because the other plot is likely 1D X-axis)
-                share_x_ax = None
-                if self.parent.first_x is not None and self.FigWrap.pos != self.parent.first_x:
-                     share_x_ax = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes
-                     if self.parent.MainParamDict['2DSlicePlane'] == 2:
-                         if not self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].GetPlotParam('twoD'):
-                             share_x_ax = None
-
-                share_y_ax = None
-                if self.parent.first_y is not None and self.FigWrap.pos != self.parent.first_y:
-                    share_y_ax = self.parent.SubPlotList[self.parent.first_y[0]][self.parent.first_y[1]].graph.axes
-
-                if self.FigWrap.pos == self.parent.first_x and self.FigWrap.pos == self.parent.first_y:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-                elif self.FigWrap.pos == self.parent.first_x:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharey = share_y_ax)
-                elif self.FigWrap.pos == self.parent.first_y:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = share_x_ax)
-                else:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = share_x_ax,
-                    sharey = share_y_ax)
-
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
+            # Only panels with the same physical coordinate on the same plot
+            # axis can share limits, which MainApp works out for us.
+            share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+            sharex = share_x_ax,
+            sharey = share_y_ax)
 
             # First choose the 'zval' to plot, we can only do one because it is 2-d.
             self.plotFlag = -1
             if self.GetPlotParam('show_x') and self.flagx == 2:
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: # Show the x-y plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fx[self.parent.zSlice,:,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fx[self.parent.zSlice,:,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: # Show the x-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fx[:,self.parent.ySlice,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fx[:,self.parent.ySlice,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: # Show the y-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fx[:,:,self.parent.xSlice], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fx[:,:,self.parent.xSlice], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-
+                self.cax = self.axes.imshow(plot_axes.two_d_slice(self, self.fx), norm = self.norm(), origin = 'lower',
+                                            **plot_axes.image_kwargs(self))
                 self.plotFlag = 0
                 self.SetPlotParam('show_y', 0, update_plot = False)
                 self.SetPlotParam('show_z', 0, update_plot = False)
 
             elif self.GetPlotParam('show_y') and self.flagy == 2:
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: # Show the x-y plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fy[self.parent.zSlice,:,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fy[self.parent.zSlice,:,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: # Show the x-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fy[:,self.parent.ySlice,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fy[:,self.parent.ySlice,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: # Show the y-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fy[:,:,self.parent.xSlice], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fy[:,:,self.parent.xSlice], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
+                self.cax = self.axes.imshow(plot_axes.two_d_slice(self, self.fy), norm = self.norm(), origin = 'lower',
+                                            **plot_axes.image_kwargs(self))
                 self.plotFlag = 1
                 self.SetPlotParam('show_x', 0, update_plot = False)
                 self.SetPlotParam('show_z', 0, update_plot = False)
@@ -580,25 +525,8 @@ class FieldsPanel:
             elif self.GetPlotParam('show_z') and self.flagz == 2:
                 # make sure z is loaded, (something has to be)
                 # set the other plot values to zero in the PlotParams
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: # Show the x-y plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fz[self.parent.zSlice,:,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fz[self.parent.zSlice,:,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: # Show the x-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fz[:,self.parent.ySlice,:], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fz[:,self.parent.ySlice,:], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: # Show the y-z plane
-                    if self.parent.MainParamDict['ImageAspect']:
-                        self.cax = self.axes.imshow(self.fz[:,:,self.parent.xSlice], norm = self.norm(), origin = 'lower')
-                    else:
-                        self.cax = self.axes.imshow(self.fz[:,:,self.parent.xSlice], origin = 'lower', norm = self.norm(),
-                                                    aspect= 'auto')
-
+                self.cax = self.axes.imshow(plot_axes.two_d_slice(self, self.fz), norm = self.norm(), origin = 'lower',
+                                            **plot_axes.image_kwargs(self))
                 self.plotFlag = 2
                 self.SetPlotParam('show_x', 0, update_plot = False)
                 self.SetPlotParam('show_y', 0, update_plot = False)
@@ -692,59 +620,36 @@ class FieldsPanel:
                 self.CbarTickFormatter()
 
 
-            self.shockline_2d = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+            self.shockline_2d = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                                     PathEffects.Normal()])
-            self.shockline_2d.set_visible(self.GetPlotParam('show_shock'))
+            self.shockline_2d.set_visible(self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x'))
             if int(matplotlib.__version__[0]) < 2:
                 self.axes.set_axis_bgcolor(self.GetPlotParam('face_color'))
             else:
                 self.axes.set_facecolor(self.GetPlotParam('face_color'))
             self.axes.tick_params(labelsize = self.parent.MainParamDict['NumFontSize'], color=tick_color)
 
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xmin, self.xmax)
+            plot_axes.apply_limits(self, (self.xmin, self.xmax), (self.ymin, self.ymax))
             self.cax.set_interpolation(self.GetPlotParam('interpolation'))
-            if self.parent.MainParamDict['SetyLim']:
-                self.axes.set_ylim(self.parent.MainParamDict['yBottom'],self.parent.MainParamDict['yTop'])
-            else:
-                self.axes.set_ylim(self.ymin, self.ymax)
-            if self.parent.MainParamDict['2DSlicePlane'] == 0:
-                self.axes.set_xlabel(r'$x\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-                self.axes.set_ylabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 1:
-                self.axes.set_xlabel(r'$x\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 2:
-                self.axes.set_xlabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            horiz_axis, vert_axis = plot_axes.two_d_axes(self)
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[horiz_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_ylabel(plot_axes.AXIS_LABELS[vert_axis], labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
         else: # It's 1D
-            if self.parent.MainParamDict['LinkSpatial'] != 0 and self.parent.MainParamDict['LinkSpatial'] != 3:
-                if self.FigWrap.pos == self.parent.first_x:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-                else:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes)
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
+            share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+            sharex = share_x_ax)
 
             self.annotate_pos = [0.8,0.9]
-            self.xmin, self.xmax = self.xaxis_values[0], self.xaxis_values[-1]
+            # The horizontal axis of a 1D panel is whichever physical axis the
+            # panel is plotted against, not necessarily x.
+            self.prof_axis = plot_axes.plot_axis_name(self)
+            self.prof_values = plot_axes.profile_values(self)
+            self.xmin, self.xmax = plot_axes.full_extent(self, 'x')
 
             min_max = [np.inf, -np.inf]
             if self.flagx > 0 and self.GetPlotParam('show_x'):
-                if self.flagx == 1 and len(self.fx.shape) == 1:
-                    self.linex = self.axes.plot(self.xaxis_values, self.fx, color = self.xcolor)
-                elif self.parent.MainParamDict['Average1D']:
-                    self.linex = self.axes.plot(self.xaxis_values, np.average(self.fx.reshape(-1,self.fx.shape[-1]), axis =0), color = self.xcolor)
-                else:
-                    self.linex = self.axes.plot(self.xaxis_values, self.fx[self.parent.zSlice,self.parent.ySlice,:], color = self.xcolor)
+                self.linex = self.axes.plot(*plot_axes.lineout_data(self, self.fx), color = self.xcolor)
                 min_max[0]=min(min_max[0],self.linex[0].get_data()[1].min())
                 min_max[1]=max(min_max[1],self.linex[0].get_data()[1].max())
             else:
@@ -759,12 +664,7 @@ class FieldsPanel:
 
             self.annotate_pos[0] += .08
             if self.flagy >0 and self.GetPlotParam('show_y'):
-                if self.flagy == 1 and len(self.flagy.shape) == 1:
-                    self.liney = self.axes.plot(self.xaxis_values, self.fy, color = self.ycolor)
-                elif self.parent.MainParamDict['Average1D']:
-                    self.liney = self.axes.plot(self.xaxis_values, np.average(self.fy.reshape(-1,self.fy.shape[-1]), axis = 0), color = self.ycolor)
-                else:
-                    self.liney = self.axes.plot(self.xaxis_values, self.fy[self.parent.zSlice,self.parent.ySlice,:], color = self.ycolor)
+                self.liney = self.axes.plot(*plot_axes.lineout_data(self, self.fy), color = self.ycolor)
 
                 min_max[0]=min(min_max[0],self.liney[0].get_data()[1].min())
                 min_max[1]=max(min_max[1],self.liney[0].get_data()[1].max())
@@ -781,12 +681,7 @@ class FieldsPanel:
             self.annotate_pos[0] += .08
 
             if self.flagz and self.GetPlotParam('show_z'):
-                if self.flagx == 1 and len(self.fz.shape) == 1:
-                    self.linez = self.axes.plot(self.xaxis_values, self.fz, color = self.zcolor)
-                if self.parent.MainParamDict['Average1D']:
-                    self.linez = self.axes.plot(self.xaxis_values, np.average(self.fz.reshape(-1,self.fz.shape[-1]), axis = 0), color = self.zcolor)
-                else: # In the x-y plane
-                    self.linez = self.axes.plot(self.xaxis_values, self.fz[self.parent.zSlice,self.parent.ySlice,:], color = self.zcolor)
+                self.linez = self.axes.plot(*plot_axes.lineout_data(self, self.fz), color = self.zcolor)
                 min_max[0]=min(min_max[0],self.linez[0].get_data()[1].min())
                 min_max[1]=max(min_max[1],self.linez[0].get_data()[1].max())
 
@@ -813,10 +708,10 @@ class FieldsPanel:
                                 )
             self.anz.set_visible(self.GetPlotParam('show_z'))
 
-            self.shock_line = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+            self.shock_line = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                         PathEffects.Normal()])
 
-            self.shock_line.set_visible(self.GetPlotParam('show_shock'))
+            self.shock_line.set_visible(self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x'))
 
             if int(matplotlib.__version__[0]) < 2:
                 self.axes.set_axis_bgcolor(self.GetPlotParam('face_color'))
@@ -825,14 +720,7 @@ class FieldsPanel:
             self.axes.tick_params(labelsize = self.parent.MainParamDict['NumFontSize'], color=tick_color)
 
 
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xaxis_values[0],self.xaxis_values[-1])
+            plot_axes.apply_limits(self)
 
 
             if self.GetPlotParam('set_v_min'):
@@ -840,7 +728,7 @@ class FieldsPanel:
             if self.GetPlotParam('set_v_max'):
                 self.axes.set_ylim(top = self.GetPlotParam('v_max'))
 
-            self.axes.set_xlabel(r'$x\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[self.prof_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
             tmplblstr = self.GetPlotParam('yaxis_label')[self.GetPlotParam('field_type')]
 
             if self.GetPlotParam('normalize_fields'):
@@ -853,12 +741,15 @@ class FieldsPanel:
         ####
         # FFT REGION PLOTTING CODE
         ####
-        self.lineleft = self.axes.axvline(0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
-        self.lineright = self.axes.axvline(0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
-        self.lineleft.set_visible(self.GetPlotParam('show_FFT_region'))
-        self.lineright.set_visible(self.GetPlotParam('show_FFT_region'))
+        # The FFT region is a range in x, so it is only drawn on panels that
+        # actually show x.
+        self.show_fft_region = self.GetPlotParam('show_FFT_region') and plot_axes.shows_axis(self, 'x')
+        self.lineleft = plot_axes.add_marker_line(self, 'x', 0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
+        self.lineright = plot_axes.add_marker_line(self, 'x', 0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
+        self.lineleft.set_visible(self.show_fft_region)
+        self.lineright.set_visible(self.show_fft_region)
 
-        if self.GetPlotParam('show_FFT_region'):
+        if self.show_fft_region:
             self.left_loc = self.parent.MainParamDict['FFTLeft'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.left_loc = max(self.left_loc, self.xmin)
             self.lineleft.set_xdata([self.left_loc,self.left_loc])
@@ -897,11 +788,14 @@ class FieldsPanel:
 
         # Main goal, only change what is showing..
 
-        self.xmin, self.xmax = self.xaxis_values[0], self.xaxis_values[-1]
-        self.lineleft.set_visible(self.GetPlotParam('show_FFT_region'))
-        self.lineright.set_visible(self.GetPlotParam('show_FFT_region'))
+        self.prof_axis = plot_axes.plot_axis_name(self)
+        self.prof_values = plot_axes.profile_values(self)
+        self.xmin, self.xmax = plot_axes.full_extent(self, 'x')
+        self.show_fft_region = self.GetPlotParam('show_FFT_region') and plot_axes.shows_axis(self, 'x')
+        self.lineleft.set_visible(self.show_fft_region)
+        self.lineright.set_visible(self.show_fft_region)
 
-        if self.GetPlotParam('show_FFT_region'):
+        if self.show_fft_region:
             # Update the position of the FFT region
             self.left_loc = self.parent.MainParamDict['FFTLeft'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.left_loc = max(self.left_loc, self.xmin)
@@ -915,36 +809,21 @@ class FieldsPanel:
         if self.GetPlotParam('twoD') == 0:
             min_max = [np.inf, -np.inf]
             if self.GetPlotParam('show_x') and self.flagx:
-                if self.flagx == 1 and len(self.fx.shape) == 1:
-                    self.linex[0].set_data(self.xaxis_values, self.fx)
-                elif self.parent.MainParamDict['Average1D']:
-                    self.linex[0].set_data(self.xaxis_values, np.average(self.fx.reshape(-1,self.fx.shape[-1]), axis =0))
-                else: # In the x-y plane
-                    self.linex[0].set_data(self.xaxis_values, self.fx[self.parent.zSlice,self.parent.ySlice,:])
+                self.linex[0].set_data(*plot_axes.lineout_data(self, self.fx))
                 self.linex[0].set_visible(True)
                 self.anx.set_visible(True)
                 min_max[0]=min(min_max[0],self.linex[0].get_data()[1].min())
                 min_max[1]=max(min_max[1],self.linex[0].get_data()[1].max())
 
             if self.GetPlotParam('show_y') and self.flagy:
-                if self.flagy == 1 and len(self.fy.shape) == 1:
-                    self.liney[0].set_data(self.xaxis_values, self.fy)
-                elif self.parent.MainParamDict['Average1D']:
-                    self.liney[0].set_data(self.xaxis_values, np.average(self.fy.reshape(-1,self.fy.shape[-1]), axis =0))
-                else:
-                    self.liney[0].set_data(self.xaxis_values, self.fy[self.parent.zSlice,self.parent.ySlice,:])
+                self.liney[0].set_data(*plot_axes.lineout_data(self, self.fy))
                 self.liney[0].set_visible(True)
                 self.any.set_visible(True)
                 min_max[0]=min(min_max[0],self.liney[0].get_data()[1].min())
                 min_max[1]=max(min_max[1],self.liney[0].get_data()[1].max())
 
             if self.GetPlotParam('show_z'):
-                if self.flagz ==1 and len(self.fz.shape) == 1:
-                    self.linez[0].set_data(self.xaxis_values, self.fz)
-                elif self.parent.MainParamDict['Average1D']:
-                    self.linez[0].set_data(self.xaxis_values, np.average(self.fz.reshape(-1,self.fz.shape[-1]), axis =0))
-                else:
-                    self.linez[0].set_data(self.xaxis_values, self.fz[self.parent.zSlice,self.parent.ySlice,:])
+                self.linez[0].set_data(*plot_axes.lineout_data(self, self.fz))
                 self.linez[0].set_visible(True)
                 self.anz.set_visible(True)
                 min_max[0]=min(min_max[0],self.linez[0].get_data()[1].min())
@@ -963,15 +842,8 @@ class FieldsPanel:
             self.axes.set_ylim(min_max)
 
             if self.GetPlotParam('show_shock'):
-                self.shock_line.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xaxis_values[0], self.xaxis_values[-1])
+                plot_axes.move_marker_line(self, self.shock_line, 'x', self.parent.shock_loc)
+            plot_axes.apply_limits(self)
 
             if self.GetPlotParam('set_v_min'):
                 self.axes.set_ylim(bottom = self.GetPlotParam('v_min'))
@@ -984,30 +856,15 @@ class FieldsPanel:
 
             if self.GetPlotParam('show_x') and self.flagx >1:
                 self.plotFlag = 0
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: #x-y plane
-                    self.cax.set_data(self.fx[self.parent.zSlice,:,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: #x-z plane
-                    self.cax.set_data(self.fx[:,self.parent.ySlice,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: #y-z plane
-                    self.cax.set_data(self.fx[:,:,self.parent.xSlice])
+                self.cax.set_data(plot_axes.two_d_slice(self, self.fx))
 
             elif self.GetPlotParam('show_y') and self.flagy >1:
                 self.plotFlag = 1
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: #x-y plane
-                    self.cax.set_data(self.fy[self.parent.zSlice,:,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: #x-z plane
-                    self.cax.set_data(self.fy[:,self.parent.ySlice,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: #y-z plane
-                    self.cax.set_data(self.fy[:,:,self.parent.xSlice])
+                self.cax.set_data(plot_axes.two_d_slice(self, self.fy))
 
             elif self.GetPlotParam('show_z') and self.flagz>1:
                 self.plotFlag = 2
-                if self.parent.MainParamDict['2DSlicePlane'] == 0: #x-y plane
-                    self.cax.set_data(self.fz[self.parent.zSlice,:,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 1: #x-z plane
-                    self.cax.set_data(self.fz[:,self.parent.ySlice,:])
-                elif self.parent.MainParamDict['2DSlicePlane'] == 2: #y-z plane
-                    self.cax.set_data(self.fz[:,:,self.parent.xSlice])
+                self.cax.set_data(plot_axes.two_d_slice(self, self.fz))
             else:
                 self.cax.set_data(np.ma.masked_array(np.empty([2,2]), mask = np.ones([2,2])))
                 self.clims = [None, None]
@@ -1021,18 +878,7 @@ class FieldsPanel:
                 self.clims = [self.cax.get_array().min(), self.cax.get_array().max()]
 
 
-            if self.parent.MainParamDict['SetxLim'] and self.parent.MainParamDict['2DSlicePlane'] != 2:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xmin,self.xmax)
-            if self.parent.MainParamDict['SetyLim']:
-                self.axes.set_ylim(self.parent.MainParamDict['yBottom'],self.parent.MainParamDict['yTop'])
-            else:
-                self.axes.set_ylim(self.ymin,self.ymax)
+            plot_axes.apply_limits(self, (self.xmin, self.xmax), (self.ymin, self.ymax))
 
             self.cax.set_extent([self.xmin, self.xmax, self.ymin, self.ymax])
             if self.plotFlag >= 0:
@@ -1060,14 +906,10 @@ class FieldsPanel:
             self.CbarTickFormatter()
 
             if self.GetPlotParam('show_shock'):
-                self.shockline_2d.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
-            if self.parent.MainParamDict['2DSlicePlane'] == 0:
-                self.axes.set_ylabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 1:
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 2:
-                self.axes.set_xlabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+                plot_axes.move_marker_line(self, self.shockline_2d, 'x', self.parent.shock_loc)
+            horiz_axis, vert_axis = plot_axes.two_d_axes(self)
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[horiz_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_ylabel(plot_axes.AXIS_LABELS[vert_axis], labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
         if self.GetPlotParam('show_streamlines') and self.GetPlotParam('twoD'):
             streamlines.refresh_streamlines(self)
@@ -1347,8 +1189,10 @@ class FieldSettings(Tk.Toplevel):
                         command = self.NormFieldHandler)
         cb.grid(row = start_row, column = 1, sticky = Tk.W)
 
-        streamlines.add_streamline_buttons(self, self.parent, starting_row=start_row + 4)
-        vector_arrows.add_vector_buttons(self, self.parent, starting_row=start_row + 4)
+        plot_axes.add_axis_buttons(self.frm, self, self.parent, row=start_row + 3, column=1, columnspan=3)
+
+        streamlines.add_streamline_buttons(self, self.parent, starting_row=start_row + 5)
+        vector_arrows.add_vector_buttons(self, self.parent, starting_row=start_row + 5)
 
     def CbarHandler(self, *args):
         if self.parent.GetPlotParam('show_cbar')== self.CbarVar.get():
@@ -1408,9 +1252,9 @@ class FieldSettings(Tk.Toplevel):
             pass
         else:
             if self.parent.GetPlotParam('twoD'):
-                self.parent.shockline_2d.set_visible(self.ShockVar.get())
+                self.parent.shockline_2d.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
             else:
-                self.parent.shock_line.set_visible(self.ShockVar.get())
+                self.parent.shock_line.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
 
             self.parent.SetPlotParam('show_shock', self.ShockVar.get())
 
@@ -1419,8 +1263,9 @@ class FieldSettings(Tk.Toplevel):
             pass
         else:
             self.parent.SetPlotParam('show_FFT_region', self.FFTVar.get(), update_plot = False)
-            self.parent.lineleft.set_visible(self.parent.GetPlotParam('show_FFT_region'))
-            self.parent.lineright.set_visible(self.parent.GetPlotParam('show_FFT_region'))
+            show_fft = self.parent.GetPlotParam('show_FFT_region') and plot_axes.shows_axis(self.parent, 'x')
+            self.parent.lineleft.set_visible(show_fft)
+            self.parent.lineright.set_visible(show_fft)
 
             ### The .parent.parent is less than ideal.... consider re-writing.
             if self.parent.GetPlotParam('show_FFT_region'):

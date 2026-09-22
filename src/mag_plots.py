@@ -9,6 +9,7 @@ from new_cnorms import PowerNormWithNeg, PowerNormFunc
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
+import plot_axes
 
 class BPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -36,6 +37,8 @@ class BPanel:
                        'face_color': 'gainsboro'
                        }
     # We need the types of all the parameters for the config file
+
+    plot_axes.add_axis_params(plot_param_dict)
 
     gradient =  np.linspace(0, 1, 256)# A way to make the colorbar display better
     gradient = np.vstack((gradient, gradient))
@@ -226,35 +229,15 @@ class BPanel:
 
         # Now that the data is loaded, start making the plots
         if self.GetPlotParam('twoD'):
-            if self.parent.MainParamDict['LinkSpatial'] != 0:
-                if self.FigWrap.pos == self.parent.first_x and self.FigWrap.pos == self.parent.first_y:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-                elif self.FigWrap.pos == self.parent.first_x:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharey = self.parent.SubPlotList[self.parent.first_y[0]][self.parent.first_y[1]].graph.axes)
-                elif self.FigWrap.pos == self.parent.first_y:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes)
-                else:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes,
-                    sharey = self.parent.SubPlotList[self.parent.first_y[0]][self.parent.first_y[1]].graph.axes)
+            # Only panels with the same physical coordinate on the same plot
+            # axis can share limits, which MainApp works out for us.
+            share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+            sharex = share_x_ax,
+            sharey = share_y_ax)
 
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-
-            if self.parent.MainParamDict['2DSlicePlane'] == 0: # x-y plane
-                if self.parent.MainParamDict['ImageAspect']:
-                    self.cax = self.axes.imshow(self.f[self.parent.zSlice,:,:], origin = 'lower', norm = self.norm())
-                else:
-                    self.cax = self.axes.imshow(self.f[self.parent.zSlice,:,:], origin = 'lower', norm = self.norm(),
-                                            aspect= 'auto')
-            elif self.parent.MainParamDict['2DSlicePlane'] == 1: # x-y plane
-                if self.parent.MainParamDict['ImageAspect']:
-                    self.cax = self.axes.imshow(self.f[:, self.parent.ySlice,:], origin = 'lower', norm = self.norm())
-                else:
-                    self.cax = self.axes.imshow(self.f[:,self.parent.ySlice,:], origin = 'lower', norm = self.norm(),
-                                            aspect= 'auto')
+            self.cax = self.axes.imshow(plot_axes.two_d_slice(self, self.f), origin = 'lower', norm = self.norm(),
+                                        **plot_axes.image_kwargs(self))
 
             self.ymin = 0
             self.ymax =  self.cax.get_array().shape[0]/self.c_omp*self.istep
@@ -328,9 +311,9 @@ class BPanel:
             else:
                 self.CbarTickFormatter()
 
-            self.shockline_2d = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+            self.shockline_2d = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                                     PathEffects.Normal()])
-            self.shockline_2d.set_visible(self.GetPlotParam('show_shock'))
+            self.shockline_2d.set_visible(self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x'))
 
             if int(matplotlib.__version__[0]) < 2:
                 self.axes.set_axis_bgcolor(self.GetPlotParam('face_color'))
@@ -339,40 +322,21 @@ class BPanel:
 
             self.axes.tick_params(labelsize = self.parent.MainParamDict['NumFontSize'], color=tick_color)
 
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xmin, self.xmax)
-            if self.parent.MainParamDict['SetyLim']:
-                self.axes.set_ylim(self.parent.MainParamDict['yBottom'],self.parent.MainParamDict['yTop'])
-            else:
-                self.axes.set_ylim(self.ymin, self.ymax)
-            self.axes.set_xlabel(r'$x\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 0:
-                self.axes.set_ylabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 1:
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            plot_axes.apply_limits(self, (self.xmin, self.xmax), (self.ymin, self.ymax))
+            horiz_axis, vert_axis = plot_axes.two_d_axes(self)
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[horiz_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_ylabel(plot_axes.AXIS_LABELS[vert_axis], labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
         else:
-            if self.parent.MainParamDict['LinkSpatial'] != 0 and self.parent.MainParamDict['LinkSpatial'] != 3:
-                if self.FigWrap.pos == self.parent.first_x:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-                else:
-                    self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                    sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes)
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
+            share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+            sharex = share_x_ax)
+            self.prof_axis = plot_axes.plot_axis_name(self)
+            self.prof_values = plot_axes.profile_values(self)
 
             self.annotate_pos = [0.8,0.9]
             # Make the 1-D plots
-            if self.parent.MainParamDict['Average1D']:
-                self.line = self.axes.plot(self.xaxis_values, np.average(self.f.reshape(-1,self.f.shape[-1]), axis = 0), color = self.mag_color)
-            else:
-                self.line = self.axes.plot(self.xaxis_values, self.f[self.parent.zSlice,self.parent.ySlice,:], color = self.mag_color)
+            self.line = self.axes.plot(*plot_axes.lineout_data(self, self.f), color = self.mag_color)
 
             # Set the Ymin/Ymax. Unnecessary.
             min_max = [self.line[0].get_data()[1].min(), self.line[0].get_data()[1].max()]
@@ -381,10 +345,10 @@ class BPanel:
             min_max[1] += 0.04*dist
             self.axes.set_ylim(min_max)
 
-            self.shock_line = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+            self.shock_line = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                         PathEffects.Normal()])
 
-            self.shock_line.set_visible(self.GetPlotParam('show_shock'))
+            self.shock_line.set_visible(self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x'))
 
             if int(matplotlib.__version__[0]) < 2:
                 self.axes.set_axis_bgcolor(self.GetPlotParam('face_color'))
@@ -393,14 +357,7 @@ class BPanel:
 
             self.axes.tick_params(labelsize = self.parent.MainParamDict['NumFontSize'], color=tick_color)#, tick1On= False, tick2On= False)
 
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xaxis_values[0],self.xaxis_values[-1])
+            plot_axes.apply_limits(self)
 
 
             if self.GetPlotParam('set_v_min'):
@@ -408,7 +365,7 @@ class BPanel:
             if self.GetPlotParam('set_v_max'):
                 self.axes.set_ylim(top = self.GetPlotParam('v_max'))
 
-            self.axes.set_xlabel(r'$x\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[self.prof_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
             self.axes.set_ylabel(self.ylabel, labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
         ####
@@ -416,19 +373,22 @@ class BPanel:
         ####
 
 
-        self.lineleft = self.axes.axvline(0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
-        self.lineright = self.axes.axvline(0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
-        self.lineleft.set_visible(self.GetPlotParam('show_FFT_region'))
-        self.lineright.set_visible(self.GetPlotParam('show_FFT_region'))
+        # The FFT region is a range in x, so it is only drawn on panels that
+        # actually show x.
+        self.show_fft_region = self.GetPlotParam('show_FFT_region') and plot_axes.shows_axis(self, 'x')
+        self.lineleft = plot_axes.add_marker_line(self, 'x', 0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
+        self.lineright = plot_axes.add_marker_line(self, 'x', 0, linewidth = 1.5, linestyle = ':', color = self.parent.FFT_color)
+        self.lineleft.set_visible(self.show_fft_region)
+        self.lineright.set_visible(self.show_fft_region)
 
-        if self.GetPlotParam('show_FFT_region'):
+        if self.show_fft_region:
             self.left_loc = self.parent.MainParamDict['FFTLeft'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.left_loc = max(self.left_loc, self.xaxis_values[0])
-            self.lineleft.set_xdata([self.left_loc,self.left_loc])
+            plot_axes.move_marker_line(self, self.lineleft, 'x', self.left_loc)
 
             self.right_loc = self.parent.MainParamDict['FFTRight'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.right_loc = min(self.right_loc, self.xaxis_values[-1])
-            self.lineright.set_xdata([self.right_loc,self.right_loc])
+            plot_axes.move_marker_line(self, self.lineright, 'x', self.right_loc)
         if self.GetPlotParam('show_cpu_domains'):
             self.FigWrap.SetCpuDomainLines()
     def refresh(self):
@@ -442,25 +402,25 @@ class BPanel:
 
         # Main goal, only change what is showing..
 
-        self.lineleft.set_visible(self.GetPlotParam('show_FFT_region'))
-        self.lineright.set_visible(self.GetPlotParam('show_FFT_region'))
+        self.show_fft_region = self.GetPlotParam('show_FFT_region') and plot_axes.shows_axis(self, 'x')
+        self.lineleft.set_visible(self.show_fft_region)
+        self.lineright.set_visible(self.show_fft_region)
 
-        if self.GetPlotParam('show_FFT_region'):
+        if self.show_fft_region:
             self.left_loc = self.parent.MainParamDict['FFTLeft'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.left_loc = max(self.left_loc, self.xaxis_values[0])
-            self.lineleft.set_xdata([self.left_loc,self.left_loc])
+            plot_axes.move_marker_line(self, self.lineleft, 'x', self.left_loc)
 
             self.right_loc = self.parent.MainParamDict['FFTRight'] + self.parent.shock_loc*self.parent.MainParamDict['FFTRelative']
             self.right_loc = min(self.right_loc, self.xaxis_values[-1])
-            self.lineright.set_xdata([self.right_loc,self.right_loc])
+            plot_axes.move_marker_line(self, self.lineright, 'x', self.right_loc)
 
 
         # First do the 1D plots, because it is simpler
         if self.GetPlotParam('twoD') == 0:
-            if self.parent.MainParamDict['Average1D']:
-                self.line[0].set_data(self.xaxis_values, np.average(self.f.reshape(-1,self.f.shape[-1]), axis = 0))
-            else:
-                self.line[0].set_data(self.xaxis_values, self.f[self.parent.zSlice,self.parent.ySlice,:])
+            self.prof_axis = plot_axes.plot_axis_name(self)
+            self.prof_values = plot_axes.profile_values(self)
+            self.line[0].set_data(*plot_axes.lineout_data(self, self.f))
 
             min_max = [self.line[0].get_data()[1].min(), self.line[0].get_data()[1].max()]
             dist = min_max[1]-min_max[0]
@@ -468,16 +428,8 @@ class BPanel:
             min_max[1] += 0.04*dist
             self.axes.set_ylim(min_max)
             if self.GetPlotParam('show_shock'):
-                self.shock_line.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
-            # xlims
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xaxis_values[0], self.xaxis_values[-1])
+                plot_axes.move_marker_line(self, self.shock_line, 'x', self.parent.shock_loc)
+            plot_axes.apply_limits(self)
 
             if self.GetPlotParam('set_v_min'):
                 self.axes.set_ylim(bottom = self.GetPlotParam('v_min'))
@@ -486,30 +438,16 @@ class BPanel:
             self.axes.set_ylabel(self.ylabel, size = self.parent.MainParamDict['AxLabelSize'])
 
         else: # Now refresh the plot if it is 2D
-            if self.parent.MainParamDict['2DSlicePlane'] == 0: # x-y plane
-                self.cax.set_data(self.f[self.parent.zSlice,:,:])
-            elif self.parent.MainParamDict['2DSlicePlane'] == 1: # x-y plane
-                self.cax.set_data(self.f[:,self.parent.ySlice,:])
+            self.cax.set_data(plot_axes.two_d_slice(self, self.f))
 
             self.ymin = 0
             self.ymax =  self.cax.get_array().shape[0]/self.c_omp*self.istep
             self.xmin = 0
-            self.xmax = self.xaxis_values[-1]
+            self.xmax =  self.cax.get_array().shape[1]/self.c_omp*self.istep
             self.TwoDan.set_text(self.ann_label)
             self.clims = np.copy([self.cax.get_array().min(), self.cax.get_array().max()])
 
-            if self.parent.MainParamDict['SetxLim']:
-                if self.parent.MainParamDict['xLimsRelative']:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                       self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-                else:
-                    self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-            else:
-                self.axes.set_xlim(self.xmin,self.xmax)
-            if self.parent.MainParamDict['SetyLim']:
-                self.axes.set_ylim(self.parent.MainParamDict['yBottom'],self.parent.MainParamDict['yTop'])
-            else:
-                self.axes.set_ylim(self.ymin,self.ymax)
+            plot_axes.apply_limits(self, (self.xmin, self.xmax), (self.ymin, self.ymax))
 
             self.cax.set_extent([self.xmin, self.xmax, self.ymin, self.ymax])
 
@@ -526,13 +464,12 @@ class BPanel:
             self.cax.norm.vmax = self.vmax
 
             self.CbarTickFormatter()
-            if self.parent.MainParamDict['2DSlicePlane'] == 0:
-                self.axes.set_ylabel(r'$y\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
-            if self.parent.MainParamDict['2DSlicePlane'] == 1:
-                self.axes.set_ylabel(r'$z\ [c/\omega_{\rm pe}]$', labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            horiz_axis, vert_axis = plot_axes.two_d_axes(self)
+            self.axes.set_xlabel(plot_axes.AXIS_LABELS[horiz_axis], labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
+            self.axes.set_ylabel(plot_axes.AXIS_LABELS[vert_axis], labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
             if self.GetPlotParam('show_shock'):
-                self.shockline_2d.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
+                plot_axes.move_marker_line(self, self.shockline_2d, 'x', self.parent.shock_loc)
             #self.axes.draw_artist(self.axes.patch)
             #self.axes.draw_artist(self.cax)
             #self.axes.draw_artist(self.axes.xaxis)
@@ -756,6 +693,8 @@ class BSettings(Tk.Toplevel):
 
         ttk.Label(frm, text ='If cnorm is Pow => sign(data)*|data|**gamma').grid(row = 10, column = 1,columnspan = 3, sticky =Tk.E)
 
+        plot_axes.add_axis_buttons(frm, self, self.parent, row=11, column=0, columnspan=4)
+
 
 
 
@@ -799,9 +738,9 @@ class BSettings(Tk.Toplevel):
             pass
         else:
             if self.parent.GetPlotParam('twoD'):
-                self.parent.shockline_2d.set_visible(self.ShockVar.get())
+                self.parent.shockline_2d.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
             else:
-                self.parent.shock_line.set_visible(self.ShockVar.get())
+                self.parent.shock_line.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
 
             self.parent.SetPlotParam('show_shock', self.ShockVar.get())
 

@@ -8,22 +8,21 @@ import numpy as np
 import matplotlib
 import matplotlib.patches
 
+import plot_axes
+import vector_arrows
+
 
 def add_streamline_plot_keys(panel):
-    """Add magnetic and electric field components needed for streamlines or Az contours."""
-    slice_plane = panel.parent.MainParamDict["2DSlicePlane"]
-    if slice_plane == 0:  # x-y plane
-        panel.arrs_needed.extend(["bx", "by"])
-        if panel.GetPlotParam("show_az_contours"):
-            panel.arrs_needed.append("ez")
-    elif slice_plane == 1:  # x-z plane
-        panel.arrs_needed.extend(["bx", "bz"])
-        if panel.GetPlotParam("show_az_contours"):
-            panel.arrs_needed.append("ey")
-    elif slice_plane == 2:  # y-z plane
-        panel.arrs_needed.extend(["by", "bz"])
-        if panel.GetPlotParam("show_az_contours"):
-            panel.arrs_needed.append("ex")
+    """Add the field components needed for streamlines or Az contours."""
+    if panel.GetPlotParam("show_streamlines"):
+        panel.arrs_needed.extend(
+            vector_arrows.field_keys(panel.GetPlotParam("streamlines_field")))
+
+    if panel.GetPlotParam("show_az_contours"):
+        # Az is built out of the in-plane magnetic field, whichever plane that is.
+        slice_plane = panel.parent.MainParamDict["2DSlicePlane"]
+        panel.arrs_needed.extend([["bx", "by"], ["bx", "bz"], ["by", "bz"]][slice_plane])
+        panel.arrs_needed.append(["ez", "ey", "ex"][slice_plane])
 
 
 def add_streamline_params(param_dictionary):
@@ -36,6 +35,7 @@ def add_streamline_params(param_dictionary):
     """
     # Streamlines parameters
     param_dictionary["show_streamlines"] = False
+    param_dictionary["streamlines_field"] = vector_arrows.B_FIELD
     param_dictionary["streamlines_stride"] = 10
     param_dictionary["streamlines_density"] = 1
     param_dictionary["streamlines_color"] = "black"
@@ -76,6 +76,20 @@ def add_streamline_buttons(settings, panel, starting_row):
         variable=settings.show_streamlines,
         command=lambda: __show_streamline_handler(settings, panel),
     ).grid(row=starting_row + 1, column=0, sticky=Tk.W)
+
+    settings.streamlines_field = Tk.StringVar()
+    field_val = settings.parent.GetPlotParam("streamlines_field")
+    if field_val >= len(vector_arrows.VECTOR_FIELDS):
+        field_val = vector_arrows.B_FIELD
+    settings.streamlines_field.set(vector_arrows.VECTOR_FIELDS[field_val])
+    Tk.ttk.Label(settings.frm, text="Field:").grid(row=starting_row + 2, column=1, sticky=Tk.W)
+    Tk.ttk.OptionMenu(
+        settings.frm,
+        settings.streamlines_field,
+        vector_arrows.VECTOR_FIELDS[field_val],
+        *tuple(vector_arrows.VECTOR_FIELDS),
+        command=lambda val: __change_streamline_field(settings, panel),
+    ).grid(row=starting_row + 2, column=2, sticky=Tk.W + Tk.E)
 
     settings.streamlines_stride = Tk.IntVar(
         value=settings.parent.GetPlotParam("streamlines_stride")
@@ -174,6 +188,25 @@ def __show_streamline_handler(settings, panel):
 
     settings.parent.parent.canvas.draw()
     settings.parent.parent.canvas.get_tk_widget().update_idletasks()
+
+
+def __change_streamline_field(settings, panel):
+    """Handle when the streamline field dropdown is changed."""
+    try:
+        field_idx = vector_arrows.VECTOR_FIELDS.index(settings.streamlines_field.get())
+    except ValueError:
+        field_idx = vector_arrows.B_FIELD
+
+    settings.parent.SetPlotParam(
+        "streamlines_field", field_idx, update_plot=False, NeedsRedraw=True
+    )
+    # The new field may well need datasets the old one did not.
+    settings.parent.parent.LoadAllKeys()
+
+    if settings.parent.GetPlotParam("show_streamlines"):
+        refresh_streamlines(panel)
+
+    settings.parent.parent.canvas.draw_idle()
 
 
 def __show_az_contours_handler(settings, panel):
@@ -278,26 +311,24 @@ def az_contours_callback(settings, update_plot=True):
 # ------------------------------------------------------------------------------
 
 def draw_streamlines(panel):
-    """Draw streamlines using matplotlib.streamplot."""
-    stride = panel.GetPlotParam("streamlines_stride")
-    slice_plane = panel.parent.MainParamDict["2DSlicePlane"]
-    if slice_plane == 0:  # x-y plane
-        bx_name, by_name = "bx", "by"
-        slice_tuple = np.s_[panel.parent.zSlice, ::stride, ::stride]
-    elif slice_plane == 1:  # x-z plane
-        bx_name, by_name = "bx", "bz"
-        slice_tuple = np.s_[::stride, panel.parent.ySlice, ::stride]
-    else:
-        bx_name, by_name = "by", "bz"
-        slice_tuple = np.s_[::stride, ::stride, panel.parent.xSlice]
+    """Draw streamlines of the selected vector field using matplotlib.streamplot."""
+    panel.FigWrap.streamlines = None
+    stride = max(1, int(panel.GetPlotParam("streamlines_stride")))
 
-    if bx_name not in panel.parent.DataDict or by_name not in panel.parent.DataDict:
+    try:
+        # in_plane_field gives the components that point along this panel's
+        # horizontal and vertical axes, for whichever plane and rotation it has.
+        bx, by = vector_arrows.in_plane_field(panel, panel.GetPlotParam("streamlines_field"))
+    except (AttributeError, KeyError, TypeError, IndexError):
         return
 
-    bx = panel.parent.DataDict[bx_name][slice_tuple]
-    by = panel.parent.DataDict[by_name][slice_tuple]
-
     if bx.ndim != 2 or by.ndim != 2:
+        return
+
+    bx = bx[::stride, ::stride]
+    by = by[::stride, ::stride]
+    if bx.shape[0] < 2 or bx.shape[1] < 2:
+        # streamplot needs a grid it can take a spacing from
         return
 
     xmin = getattr(panel, "xmin", 0.0)
@@ -779,8 +810,11 @@ def draw_az_contours(panel):
     ymin = getattr(panel, "ymin", 0.0)
     ymax = getattr(panel, "ymax", float(bx.shape[0]))
 
-    coords_x = np.linspace(xmin, xmax, bx.shape[1])
-    coords_y = np.linspace(ymin, ymax, bx.shape[0])
+    if plot_axes.is_rotated(panel):
+        Az_plot = Az_plot.T
+
+    coords_x = np.linspace(xmin, xmax, Az_plot.shape[1])
+    coords_y = np.linspace(ymin, ymax, Az_plot.shape[0])
 
     color = panel.GetPlotParam("az_contours_color")
     width = float(panel.GetPlotParam("az_contours_width"))

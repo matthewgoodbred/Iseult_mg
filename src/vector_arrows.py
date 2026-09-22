@@ -4,36 +4,84 @@
 
 import tkinter as Tk
 import numpy as np
+import plot_axes
 import matplotlib
+
+
+# The vector fields that can be drawn, as arrows here or as streamlines in
+# streamlines.py. The index into this list is what 'vector_type' stores.
+VECTOR_FIELDS = ['B Field', 'E field', 'J [current]', 'Vi (ion vel)',
+                 'Ve (electron vel)', 'S (Poynting)']
+
+B_FIELD, E_FIELD, J_FIELD, VI_FIELD, VE_FIELD, S_FIELD = range(len(VECTOR_FIELDS))
 
 
 def add_vector_params(param_dictionary):
     """Add data to the parameter dictionary for controlling the vectors.
     """
     param_dictionary["show_vectors"] = False
-    param_dictionary["vector_type"] = 0  # 0: B, 1: E, 2: J, 3: Vi, 4: Ve
+    param_dictionary["vector_type"] = B_FIELD
+
+
+def field_keys(vtype):
+    """The datasets a vector field needs in order to give any component."""
+    if vtype == B_FIELD:
+        return ['bx', 'by', 'bz']
+    if vtype == E_FIELD:
+        return ['ex', 'ey', 'ez']
+    if vtype == J_FIELD:
+        return ['jx', 'jy', 'jz']
+    if vtype == VI_FIELD:
+        return ['v3xi', 'v3yi', 'v3zi']
+    if vtype == VE_FIELD:
+        return ['v3x', 'v3y', 'v3z', 'v3xi', 'v3yi', 'v3zi', 'dens', 'densi']
+    if vtype == S_FIELD:
+        return plot_axes.poynting_keys()
+    return []
+
+
+def field_component(panel, vtype, axis):
+    """The whole array of one component of vector field `vtype`.
+
+    `axis` is a physical axis name, so the caller can ask for whichever
+    component points along the direction it is about to draw.
+    """
+    load = panel.FigWrap.LoadKey
+    if vtype == B_FIELD:
+        return load('b' + axis)
+    if vtype == E_FIELD:
+        return load('e' + axis)
+    if vtype == J_FIELD:
+        return load('j' + axis)
+    if vtype == VI_FIELD:
+        return load('v3' + axis + 'i')
+    if vtype == VE_FIELD:
+        # The electron fluid velocity is what is left of the total once the
+        # ions are taken out of it.
+        dens = np.asanyarray(load('dens'))
+        densi = np.asanyarray(load('densi'))
+        dense = np.maximum(dens - densi, 1e-5)
+        return (dens * load('v3' + axis) - densi * load('v3' + axis + 'i')) / dense
+    if vtype == S_FIELD:
+        return plot_axes.poynting_component(load, axis)
+    raise KeyError(f'unknown vector field {vtype}')
+
+
+def in_plane_field(panel, vtype):
+    """The (horizontal, vertical) parts of vector field `vtype` on this panel."""
+    return plot_axes.in_plane_slices(panel, lambda axis: field_component(panel, vtype, axis))
 
 
 def add_vector_plot_keys(panel):
     """Add components of the selected vector type to arrs_needed.
     """
-    vtype = panel.GetPlotParam('vector_type')
-    if vtype == 0:  # B Field
-        panel.arrs_needed.extend(['bx', 'by', 'bz'])
-    elif vtype == 1:  # E field
-        panel.arrs_needed.extend(['ex', 'ey', 'ez'])
-    elif vtype == 2:  # J [current]
-        panel.arrs_needed.extend(['jx', 'jy', 'jz'])
-    elif vtype == 3:  # Vi (ion vel)
-        panel.arrs_needed.extend(['v3xi', 'v3yi', 'v3zi'])
-    elif vtype == 4:  # Ve (electron vel)
-        panel.arrs_needed.extend(['v3x', 'v3y', 'v3z', 'v3xi', 'v3yi', 'v3zi', 'dens', 'densi'])
+    panel.arrs_needed.extend(field_keys(panel.GetPlotParam('vector_type')))
 
 
 def add_vector_buttons(settings, panel, starting_row):
     """Add the vectors checkbox and dropdown selection to the settings window next to streamlines.
     """
-    settings.VectorList = ['B Field', 'E field', 'J [current]', 'Vi (ion vel)', 'Ve (electron vel)']
+    settings.VectorList = list(VECTOR_FIELDS)
 
     settings.show_vectors = Tk.BooleanVar()
     settings.show_vectors.set(settings.parent.GetPlotParam("show_vectors"))
@@ -152,82 +200,14 @@ def draw_vectors(panel):
     """
     remove_vectors(panel)
 
-    slice_plane = panel.parent.MainParamDict["2DSlicePlane"]
-    vtype = panel.GetPlotParam('vector_type')
-
     try:
-        if vtype == 0:  # B Field
-            if slice_plane == 0:
-                U_full = panel.FigWrap.LoadKey('bx')[panel.parent.zSlice, :, :]
-                V_full = panel.FigWrap.LoadKey('by')[panel.parent.zSlice, :, :]
-            elif slice_plane == 1:
-                U_full = panel.FigWrap.LoadKey('bx')[:, panel.parent.ySlice, :]
-                V_full = panel.FigWrap.LoadKey('bz')[:, panel.parent.ySlice, :]
-            elif slice_plane == 2:
-                U_full = panel.FigWrap.LoadKey('by')[:, :, panel.parent.xSlice]
-                V_full = panel.FigWrap.LoadKey('bz')[:, :, panel.parent.xSlice]
-        elif vtype == 1:  # E Field
-            if slice_plane == 0:
-                U_full = panel.FigWrap.LoadKey('ex')[panel.parent.zSlice, :, :]
-                V_full = panel.FigWrap.LoadKey('ey')[panel.parent.zSlice, :, :]
-            elif slice_plane == 1:
-                U_full = panel.FigWrap.LoadKey('ex')[:, panel.parent.ySlice, :]
-                V_full = panel.FigWrap.LoadKey('ez')[:, panel.parent.ySlice, :]
-            elif slice_plane == 2:
-                U_full = panel.FigWrap.LoadKey('ey')[:, :, panel.parent.xSlice]
-                V_full = panel.FigWrap.LoadKey('ez')[:, :, panel.parent.xSlice]
-        elif vtype == 2:  # J Field
-            if slice_plane == 0:
-                U_full = panel.FigWrap.LoadKey('jx')[panel.parent.zSlice, :, :]
-                V_full = panel.FigWrap.LoadKey('jy')[panel.parent.zSlice, :, :]
-            elif slice_plane == 1:
-                U_full = panel.FigWrap.LoadKey('jx')[:, panel.parent.ySlice, :]
-                V_full = panel.FigWrap.LoadKey('jz')[:, panel.parent.ySlice, :]
-            elif slice_plane == 2:
-                U_full = panel.FigWrap.LoadKey('jy')[:, :, panel.parent.xSlice]
-                V_full = panel.FigWrap.LoadKey('jz')[:, :, panel.parent.xSlice]
-        elif vtype == 3:  # Vi Field
-            if slice_plane == 0:
-                U_full = panel.FigWrap.LoadKey('v3xi')[panel.parent.zSlice, :, :]
-                V_full = panel.FigWrap.LoadKey('v3yi')[panel.parent.zSlice, :, :]
-            elif slice_plane == 1:
-                U_full = panel.FigWrap.LoadKey('v3xi')[:, panel.parent.ySlice, :]
-                V_full = panel.FigWrap.LoadKey('v3zi')[:, panel.parent.ySlice, :]
-            elif slice_plane == 2:
-                U_full = panel.FigWrap.LoadKey('v3yi')[:, :, panel.parent.xSlice]
-                V_full = panel.FigWrap.LoadKey('v3zi')[:, :, panel.parent.xSlice]
-        elif vtype == 4:  # Ve Field
-            dens = panel.FigWrap.LoadKey('dens')
-            densi = panel.FigWrap.LoadKey('densi')
-            dense = np.maximum(dens - densi, 1e-5)
+        # in_plane_field picks the components that really do point along this
+        # panel's horizontal and vertical axes, rotation included.
+        U_full, V_full = in_plane_field(panel, panel.GetPlotParam('vector_type'))
+    except (AttributeError, KeyError, TypeError, IndexError):
+        return
 
-            if slice_plane == 0:
-                v3x = panel.FigWrap.LoadKey('v3x')[panel.parent.zSlice, :, :]
-                v3xi = panel.FigWrap.LoadKey('v3xi')[panel.parent.zSlice, :, :]
-                v3y = panel.FigWrap.LoadKey('v3y')[panel.parent.zSlice, :, :]
-                v3yi = panel.FigWrap.LoadKey('v3yi')[panel.parent.zSlice, :, :]
-
-                U_full = (dens[panel.parent.zSlice, :, :] * v3x - densi[panel.parent.zSlice, :, :] * v3xi) / dense[panel.parent.zSlice, :, :]
-                V_full = (dens[panel.parent.zSlice, :, :] * v3y - densi[panel.parent.zSlice, :, :] * v3yi) / dense[panel.parent.zSlice, :, :]
-            elif slice_plane == 1:
-                v3x = panel.FigWrap.LoadKey('v3x')[:, panel.parent.ySlice, :]
-                v3xi = panel.FigWrap.LoadKey('v3xi')[:, panel.parent.ySlice, :]
-                v3z = panel.FigWrap.LoadKey('v3z')[:, panel.parent.ySlice, :]
-                v3zi = panel.FigWrap.LoadKey('v3zi')[:, panel.parent.ySlice, :]
-
-                U_full = (dens[:, panel.parent.ySlice, :] * v3x - densi[:, panel.parent.ySlice, :] * v3xi) / dense[:, panel.parent.ySlice, :]
-                V_full = (dens[:, panel.parent.ySlice, :] * v3z - densi[:, panel.parent.ySlice, :] * v3zi) / dense[:, panel.parent.ySlice, :]
-            elif slice_plane == 2:
-                v3y = panel.FigWrap.LoadKey('v3y')[:, :, panel.parent.xSlice]
-                v3yi = panel.FigWrap.LoadKey('v3yi')[:, :, panel.parent.xSlice]
-                v3z = panel.FigWrap.LoadKey('v3z')[:, :, panel.parent.xSlice]
-                v3zi = panel.FigWrap.LoadKey('v3zi')[:, :, panel.parent.xSlice]
-
-                U_full = (dens[:, :, panel.parent.xSlice] * v3y - densi[:, :, panel.parent.xSlice] * v3yi) / dense[:, :, panel.parent.xSlice]
-                V_full = (dens[:, :, panel.parent.xSlice] * v3z - densi[:, :, panel.parent.xSlice] * v3zi) / dense[:, :, panel.parent.xSlice]
-        else:
-            return
-    except (AttributeError, KeyError, TypeError):
+    if U_full.ndim != 2 or V_full.ndim != 2:
         return
 
     register_zoom_callback(panel)

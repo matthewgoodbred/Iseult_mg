@@ -10,6 +10,7 @@ from Numba2DHist import Fast2DHist, Fast2DWeightedHist, vecLog10Norm
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
+import plot_axes
 
 class PhasePanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -44,6 +45,10 @@ class PhasePanel:
                        'interpolation': 'nearest',
                        'filter_by_viewport': True,
                        'face_color': 'gainsboro'}
+
+    # A phase plot is drawn as an image, but only its horizontal axis is
+    # spatial, so it opts out of the default 2D axis handling.
+    plot_axes.add_axis_params(plot_param_dict, two_d=False)
 
 
     prtl_opts = ['proton_p', 'electron_p']
@@ -94,7 +99,9 @@ class PhasePanel:
         # This should only be called by the user-interaction when all the plots already exist...
         # so we can take some shortcut  s and assume a lot of things are already created.
         self.SetPlotParam('show_int_region', self.IntRegVar.get(), update_plot = False)
-        if self.IntRegVar.get() == True:
+        # The spectral integration region is a range in x, so it means nothing
+        # on a panel plotted against another axis.
+        if self.IntRegVar.get() == True and plot_axes.shows_axis(self, 'x'):
             # We need to show the integration region.
 
             # Look for all the spectra plots and plot the lines.
@@ -138,6 +145,24 @@ class PhasePanel:
         self.parent.canvas.draw()
         self.parent.canvas.get_tk_widget().update_idletasks()
 
+    def positions(self, prtl_type):
+        '''The particle positions the histogram runs along, in c/omega_pe.
+
+        Falls back to x if the data does not hold the chosen coordinate, which
+        is the case for a 1D run.
+        '''
+        axis = plot_axes.plot_axis_name(self)
+        coord = plot_axes.load_positions(self, prtl_type, axis)
+        if coord is None and axis != 'x':
+            self.SetPlotParam('plot_axis', 0, update_plot = False)
+            self.prof_axis = 'x'
+            coord = plot_axes.load_positions(self, prtl_type, 'x')
+        return coord
+
+    def spatial_plot_axes(self):
+        '''The physical axes of this panel: the momentum axis is not one.'''
+        return plot_axes.plot_axis_name(self), None
+
     def ChangePlotType(self, str_arg):
         self.FigWrap.ChangeGraph(str_arg)
 
@@ -159,7 +184,12 @@ class PhasePanel:
         Need_Energy = Need_Energy or self.GetPlotParam('set_E_min')
         Need_Energy = Need_Energy or self.GetPlotParam('set_E_max')
 
-        if self.GetPlotParam('prtl_type') == 0:
+        # The coordinate the histogram runs along, plus x, which is still used
+        # to place the shock and the spectral integration region.
+        prtl_type = self.GetPlotParam('prtl_type')
+        needed_axes = {'x', plot_axes.plot_axis_name(self)}
+
+        if prtl_type == 0:
             self.arrs_needed.append('xi')
             if self.GetPlotParam('weighted'):
                 self.arrs_needed.append('chi')
@@ -174,7 +204,7 @@ class PhasePanel:
             elif self.GetPlotParam('mom_dim') == 2:
                 self.arrs_needed.append('wi')
 
-        if self.GetPlotParam('prtl_type') == 1:
+        if prtl_type == 1:
             self.arrs_needed.append('xe')
             if self.GetPlotParam('weighted'):
                 self.arrs_needed.append('che')
@@ -190,22 +220,12 @@ class PhasePanel:
                 self.arrs_needed.append('we')
 
         if self.GetPlotParam('filter_by_viewport') and self.parent.is_viewport_zoomed():
-            try:
-                import h5py
-                prtl_file = self.FigWrap.parent.PathDict['Prtl'][0]
-                with h5py.File(prtl_file, 'r') as f:
-                    if self.GetPlotParam('prtl_type') == 0:
-                        if 'yi' in f or 'y_2' in f:
-                            self.arrs_needed.append('yi')
-                        if 'zi' in f or 'z_2' in f:
-                            self.arrs_needed.append('zi')
-                    else:
-                        if 'ye' in f or 'y_1' in f:
-                            self.arrs_needed.append('ye')
-                        if 'ze' in f or 'z_1' in f:
-                            self.arrs_needed.append('ze')
-            except Exception:
-                pass
+            # The region selected in a 2D panel can constrain any coordinate.
+            needed_axes |= {'y', 'z'}
+
+        for key in plot_axes.available_position_keys(self, prtl_type, sorted(needed_axes)):
+            if key not in self.arrs_needed:
+                self.arrs_needed.append(key)
 
         return self.arrs_needed
 
@@ -239,10 +259,8 @@ class PhasePanel:
         self.key_name += self.prtl_opts[self.GetPlotParam('prtl_type')]
         self.key_name += self.direction_opts[self.GetPlotParam('mom_dim')]
         self.key_name += str(int(self.parent.MainParamDict['PrtlStride']))
-
-        if self.viewport is not None:
-            xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
-            self.key_name += f'_vp_{xlim_0:.4f}_{xlim_1:.4f}_{ylim_0:.4f}_{ylim_1:.4f}_{plane}'
+        self.key_name += '_vs' + plot_axes.plot_axis_name(self)
+        self.key_name += plot_axes.viewport_key(self.viewport)
 
         if self.key_name in self.parent.DataDict.keys():
             self.hist2d = self.parent.DataDict[self.key_name]
@@ -254,10 +272,12 @@ class PhasePanel:
             self.weights = None
             self.x_values = None
             self.y_values = None
+            self.prof_axis = plot_axes.plot_axis_name(self)
 
-            # x_min & x_max before boostin'
+            # The extent of the domain along the axis the histogram runs along,
+            # before boostin'
             self.xmin = 0
-            self.xmax = self.FigWrap.LoadKey('bx').shape[2]/self.c_omp*self.istep
+            self.xmax = plot_axes.domain_extent(self, self.prof_axis)
             self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
 
             # First calculate beta and gamma
@@ -278,7 +298,7 @@ class PhasePanel:
             # the velocity and LF in the boosted frame.
             if self.GetPlotParam('prtl_type') == 0:
                 # first load everything downstream frame
-                self.x_values = self.FigWrap.LoadKey('xi')/self.c_omp
+                self.x_values = self.positions(0)
 
                 u = self.FigWrap.LoadKey('ui')
                 v = self.FigWrap.LoadKey('vi')
@@ -287,7 +307,7 @@ class PhasePanel:
                     self.weights = self.FigWrap.LoadKey('chi')
 
             if self.GetPlotParam('prtl_type') == 1: #electons
-                self.x_values = self.FigWrap.LoadKey('xe')/self.c_omp
+                self.x_values = self.positions(1)
                 u = self.FigWrap.LoadKey('ue')
                 v = self.FigWrap.LoadKey('ve')
                 w = self.FigWrap.LoadKey('we')
@@ -344,45 +364,14 @@ class PhasePanel:
                 if self.GetPlotParam('set_E_max'):
                     inRange &= energy <= self.FigWrap.GetPlotParam('E_max')
 
-            # Filter by viewport if active
+            # Keep only the particles inside the region picked out in a 2D
+            # panel, and, if that region constrains the axis this histogram
+            # runs along, bin over that range only.
             if self.viewport is not None:
-                xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
-                xlim_min, xlim_max = min(xlim_0, xlim_1), max(xlim_0, xlim_1)
-                ylim_min, ylim_max = min(ylim_0, ylim_1), max(ylim_0, ylim_1)
-
-                if plane in [0, 1]:
-                    inRange &= (self.x_values >= xlim_min) & (self.x_values <= xlim_max)
-                    self.xmin = xlim_min
-                    self.xmax = xlim_max
-
-                prtl_type = self.GetPlotParam('prtl_type')
-                if plane == 0: # x-y plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    try:
-                        y_coord = self.FigWrap.LoadKey(y_key) / self.c_omp
-                        inRange &= (y_coord >= ylim_min) & (y_coord <= ylim_max)
-                    except KeyError:
-                        pass
-                elif plane == 1: # x-z plane
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    try:
-                        z_coord = self.FigWrap.LoadKey(z_key) / self.c_omp
-                        inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                    except KeyError:
-                        pass
-                elif plane == 2: # y-z plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    try:
-                        y_coord = self.FigWrap.LoadKey(y_key) / self.c_omp
-                        inRange &= (y_coord >= xlim_min) & (y_coord <= xlim_max)
-                    except KeyError:
-                        pass
-                    try:
-                        z_coord = self.FigWrap.LoadKey(z_key) / self.c_omp
-                        inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                    except KeyError:
-                        pass
+                own_range = plot_axes.filter_by_viewport(self, self.viewport,
+                                                         self.GetPlotParam('prtl_type'), inRange)
+                if own_range is not None:
+                    self.xmin, self.xmax = own_range
 
             inRange &= np.logical_not(nan_ind)
 
@@ -421,10 +410,11 @@ class PhasePanel:
             self.weights = None
             self.x_values = None
             self.y_values = None
+            self.prof_axis = plot_axes.plot_axis_name(self)
 
             # Choose the particle type and px, py, or pz
             if self.GetPlotParam('prtl_type') == 0: #protons
-                self.x_values = self.FigWrap.LoadKey('xi')/self.c_omp
+                self.x_values = self.positions(0)
                 if self.GetPlotParam('weighted'):
                     self.weights = self.FigWrap.LoadKey('chi')
                 if self.GetPlotParam('mom_dim') == 0:
@@ -436,7 +426,7 @@ class PhasePanel:
 
             if self.GetPlotParam('prtl_type') == 1: #electons
                 self.energy_color = self.parent.electron_color
-                self.x_values = self.FigWrap.LoadKey('xe')/self.c_omp
+                self.x_values = self.positions(1)
                 if self.GetPlotParam('weighted'):
                     self.weights = self.FigWrap.LoadKey('che')
                 if self.GetPlotParam('mom_dim') == 0:
@@ -447,7 +437,7 @@ class PhasePanel:
                     self.y_values = self.FigWrap.LoadKey('we')
 
             self.xmin = 0
-            self.xmax = self.FigWrap.LoadKey('bx').shape[2]/self.c_omp*self.istep
+            self.xmax = plot_axes.domain_extent(self, self.prof_axis)
             self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
 
             inRange = np.ones(len(self.y_values), dtype=bool)
@@ -481,45 +471,14 @@ class PhasePanel:
                 if self.GetPlotParam('set_E_max'):
                     inRange &= energy <= self.FigWrap.GetPlotParam('E_max')
 
-            # Filter by viewport if active
+            # Keep only the particles inside the region picked out in a 2D
+            # panel, and, if that region constrains the axis this histogram
+            # runs along, bin over that range only.
             if self.viewport is not None:
-                xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
-                xlim_min, xlim_max = min(xlim_0, xlim_1), max(xlim_0, xlim_1)
-                ylim_min, ylim_max = min(ylim_0, ylim_1), max(ylim_0, ylim_1)
-
-                if plane in [0, 1]:
-                    inRange &= (self.x_values >= xlim_min) & (self.x_values <= xlim_max)
-                    self.xmin = xlim_min
-                    self.xmax = xlim_max
-
-                prtl_type = self.GetPlotParam('prtl_type')
-                if plane == 0: # x-y plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    try:
-                        y_coord = self.FigWrap.LoadKey(y_key) / self.c_omp
-                        inRange &= (y_coord >= ylim_min) & (y_coord <= ylim_max)
-                    except KeyError:
-                        pass
-                elif plane == 1: # x-z plane
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    try:
-                        z_coord = self.FigWrap.LoadKey(z_key) / self.c_omp
-                        inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                    except KeyError:
-                        pass
-                elif plane == 2: # y-z plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    try:
-                        y_coord = self.FigWrap.LoadKey(y_key) / self.c_omp
-                        inRange &= (y_coord >= xlim_min) & (y_coord <= xlim_max)
-                    except KeyError:
-                        pass
-                    try:
-                        z_coord = self.FigWrap.LoadKey(z_key) / self.c_omp
-                        inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                    except KeyError:
-                        pass
+                own_range = plot_axes.filter_by_viewport(self, self.viewport,
+                                                         self.GetPlotParam('prtl_type'), inRange)
+                if own_range is not None:
+                    self.xmin, self.xmax = own_range
 
             # Calculate pmin and pmax after filtering!
             self.pmin = 0.0 if len(self.y_values[inRange]) == 0 else min(self.y_values[inRange])
@@ -557,10 +516,13 @@ class PhasePanel:
         for line in self.IntRegionLines:
             line.set_color(self.energy_color)
         #set the xlabels
-        if self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8:
+        self.prof_axis = plot_axes.plot_axis_name(self)
+        # The boost is along x, so only x is a primed coordinate.
+        boosted = self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8
+        if boosted and self.prof_axis == 'x':
             self.x_label = r'$x\prime\ [c/\omega_{\rm pe}]$'
         else:
-            self.x_label = r'$x\ [c/\omega_{\rm pe}]$'
+            self.x_label = plot_axes.AXIS_LABELS[self.prof_axis]
         #set the ylabel
         self.y_label  = self.ylabel_list[self.parent.MainParamDict['DoLorentzBoost']][self.GetPlotParam('prtl_type')][self.GetPlotParam('mom_dim')]
 
@@ -595,13 +557,10 @@ class PhasePanel:
 
         self.gs = gridspec.GridSpecFromSubplotSpec(100,100, subplot_spec = self.parent.gs0[self.FigWrap.pos])#, bottom=0.2,left=0.1,right=0.95, top = 0.95)
 
-        if self.parent.MainParamDict['LinkSpatial'] == 1:
-            if self.FigWrap.pos == self.parent.first_x:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]], sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes)
-        else:
-            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
+        # A phase plot only shares the spatial axis it is plotted against.
+        share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+        self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+                                           sharex = share_x_ax)
 
         self.cax = self.axes.imshow(self.hist2d[0],
                                     cmap = new_cmaps.cmaps[self.parent.MainParamDict['ColorMap']],
@@ -613,9 +572,9 @@ class PhasePanel:
 
         self.cax.set_clim(self.clim)
 
-        self.shock_line = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+        self.shock_line = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                    PathEffects.Normal()])
-        if not self.GetPlotParam('show_shock'):
+        if not (self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x')):
             self.shock_line.set_visible(False)
 
 
@@ -706,7 +665,7 @@ class PhasePanel:
 
 
         if self.GetPlotParam('show_shock'):
-            self.shock_line.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
+            plot_axes.move_marker_line(self, self.shock_line, 'x', self.parent.shock_loc)
 
         self.UpdateLabelsandColors()
         self.axes.set_xlabel(self.x_label, labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
@@ -721,13 +680,8 @@ class PhasePanel:
             self.ymax = abs(self.ymin)
         self.axes.set_ylim(self.ymin, self.ymax)
 
-        if self.parent.MainParamDict['SetxLim'] and self.parent.MainParamDict['LinkSpatial'] == 1:
-            if self.parent.MainParamDict['xLimsRelative']:
-                self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                   self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-            else:
-                self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
-
+        if self.parent.MainParamDict['LinkSpatial'] == 1:
+            plot_axes.apply_limits(self, (self.xmin, self.xmax))
         else:
             self.axes.set_xlim(self.xmin,self.xmax)
 
@@ -781,8 +735,8 @@ class PhasePanel:
     def GetPlotParam(self, keyname):
         return self.FigWrap.GetPlotParam(keyname)
 
-    def SetPlotParam(self, keyname, value,  update_plot = True):
-        self.FigWrap.SetPlotParam(keyname, value,  update_plot = update_plot)
+    def SetPlotParam(self, keyname, value,  update_plot = True, NeedsRedraw = False):
+        self.FigWrap.SetPlotParam(keyname, value,  update_plot = update_plot, NeedsRedraw = NeedsRedraw)
 
     def OpenSettings(self):
         if self.settings_window is None:
@@ -838,18 +792,21 @@ class PhaseSettings(Tk.Toplevel):
                 value=i).grid(row = 2+i, sticky =Tk.W)
 
         # the Radiobox Control to choose the momentum dim
-        self.dimList = ['x-px', 'x-py', 'x-pz']
         self.dimvar = Tk.IntVar()
         self.dimvar.set(self.parent.GetPlotParam('mom_dim'))
 
-        ttk.Label(frm, text='Dimenison:').grid(row = 1, column = 1, sticky = Tk.W)
+        self.dimLabel = ttk.Label(frm, text=self.DimLabelText())
+        self.dimLabel.grid(row = 1, column = 1, sticky = Tk.W)
 
-        for i in range(len(self.dimList)):
-            ttk.Radiobutton(frm,
-                text=self.dimList[i],
+        self.dimButtons = []
+        for i, name in enumerate(self.DimNames()):
+            button = ttk.Radiobutton(frm,
+                text=name,
                 variable=self.dimvar,
                 command = self.RadioDim,
-                value=i).grid(row = 2+i, column = 1, sticky = Tk.W)
+                value=i)
+            button.grid(row = 2+i, column = 1, sticky = Tk.W)
+            self.dimButtons.append(button)
 
 
         # Control whether or not Cbar is shown
@@ -913,6 +870,9 @@ class PhaseSettings(Tk.Toplevel):
         self.xBins.set(str(self.parent.GetPlotParam('xbins')))
         ttk.Label(frm, text ='# of xbins').grid(row = 10, column = 0, sticky = Tk.W)
         ttk.Entry(frm, textvariable=self.xBins, width=7).grid(row = 10, column = 1)
+
+        plot_axes.add_axis_buttons(frm, self, self.parent, row=11, column=0, columnspan=3, two_d=False,
+                                   on_change=self.RefreshDimLabels)
 
         self.FilterVPVar = Tk.IntVar()
         self.FilterVPVar.set(self.parent.GetPlotParam('filter_by_viewport'))
@@ -1022,7 +982,7 @@ class PhaseSettings(Tk.Toplevel):
         if self.parent.GetPlotParam('show_shock')== self.ShockVar.get():
             pass
         else:
-            self.parent.shock_line.set_visible(self.ShockVar.get())
+            self.parent.shock_line.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
             self.parent.SetPlotParam('show_shock', self.ShockVar.get())
 
 
@@ -1059,6 +1019,20 @@ class PhaseSettings(Tk.Toplevel):
             #self.parent.lineleft.set_color(self.parent.energy_color)
             #self.parent.lineright.set_color(self.parent.energy_color)
             self.parent.SetPlotParam('prtl_type', self.pvar.get())
+
+    def DimNames(self):
+        '''The momentum choices, named after the axis they are plotted against.'''
+        axis = plot_axes.plot_axis_name(self.parent)
+        return [axis + '-px', axis + '-py', axis + '-pz']
+
+    def DimLabelText(self):
+        return plot_axes.plot_axis_name(self.parent) + '-Momentum:'
+
+    def RefreshDimLabels(self):
+        '''Rename the momentum controls after a change to the spatial axis.'''
+        self.dimLabel.config(text=self.DimLabelText())
+        for button, name in zip(self.dimButtons, self.DimNames()):
+            button.config(text=name)
 
     def RadioDim(self):
         if self.dimvar.get() == self.parent.GetPlotParam('mom_dim'):

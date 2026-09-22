@@ -3,6 +3,7 @@ import re # regular expressions
 import os, sys # Used to make the code portable
 import data_loading # Allows us the read the data files
 import time, string, io
+import traceback # so one broken panel can be reported instead of crashing Iseult
 from PIL import Image
 import matplotlib
 matplotlib.use('TkAgg')
@@ -23,6 +24,8 @@ from energy_plots import EnergyPanel
 from fft_plots import FFTPanel
 from total_energy_plots import TotEnergyPanel
 from moments import MomentsPanel
+import plot_axes
+from view_state import view_limits, view_from_limits
 from functools import partial
 import subprocess, yaml
 from PIL import Image
@@ -120,6 +123,10 @@ class SubPlotWrapper:
         self.graph = graph # The panel class-- e.g. PhasesPanel, FieldsPanel...etc
         self.Changedto1D = False # needed to keep track of color bars and views
         self.Changedto2D = False # needed to keep track of color bars and views
+        # True while this panel could not be drawn. Its artists are then either
+        # missing or left over from a cleared figure, so the rest of Iseult has
+        # to leave it alone until it is successfully drawn again.
+        self.draw_failed = False
         #
     def GetKeys(self):
         ''' A function that returns a list of all of the keys required to plot
@@ -238,12 +245,84 @@ class SubPlotWrapper:
 
         self.graph.draw()
 
+    def DrawGraphSafely(self):
+        '''Draw this panel, keeping a failure inside it.
+
+        A panel is drawn into a figure that has just been cleared, so an
+        exception escaping here would leave every panel after it holding
+        artists that belong to the cleared figure, and the whole session would
+        then raise on any later refresh. Instead the failure is reported in the
+        panel itself and the rest of the figure is drawn as usual. Returns
+        whether the panel drew.'''
+        self.draw_failed = False
+        try:
+            self.DrawGraph()
+        except Exception:
+            self.HandlePanelFailure('draw')
+        return not self.draw_failed
+
     def RefreshGraph(self):
         ''' This function calls a function that must be defined in the subplotpanel
          class, e.g. FieldsPanel.... It only updates things held by  the panel to the data in output files with the current timestep.
          It should be called when stepping through the times, or possibly when a plot param changes.
          It will be called if RenewCanvas(ForceRedraw = False)'''
         self.graph.refresh()
+
+    def RefreshGraphSafely(self):
+        '''Refresh this panel, keeping a failure inside it.
+
+        A panel that did not draw has nothing to refresh, and one that raises
+        while refreshing is left showing why rather than being allowed to take
+        the other panels down with it. Returns whether the panel refreshed.'''
+        if self.draw_failed:
+            return False
+        try:
+            self.RefreshGraph()
+        except Exception:
+            self.HandlePanelFailure('refresh')
+        return not self.draw_failed
+
+    def HandlePanelFailure(self, action):
+        '''Report the exception being handled inside the panel's own cell.
+
+        The traceback still goes to the terminal, where it is the only record
+        of what actually went wrong, and the panel is marked as failed so that
+        nothing else in Iseult touches its half-built artists. The next full
+        redraw, e.g. after the offending setting is changed, tries the panel
+        again.'''
+        self.draw_failed = True
+        message = f'{self.chartType} failed to {action}:\n' + traceback.format_exc()
+        print(message, file = sys.stderr)
+        # Only the last line of the traceback is short enough to be readable in
+        # a panel; the terminal has the rest.
+        summary = traceback.format_exc().strip().split('\n')[-1]
+        verb = 'drawn' if action == 'draw' else 'updated'
+        try:
+            self.ShowPanelError(f'{self.chartType} could not be {verb}\n\n{summary}\n\nSee the terminal for the traceback.')
+        except Exception:
+            # Drawing the message is a courtesy; never let it raise in turn.
+            print('Could not show the error in the panel itself:\n' + traceback.format_exc(), file = sys.stderr)
+
+    def ShowPanelError(self, message):
+        '''Replace this panel with `message` written in its grid cell.'''
+        figure = self.parent.f
+        # Any axes the panel managed to make holds a partly updated plot, which
+        # would otherwise be left on the figure underneath the message.
+        for attr in ('axes', 'axC'):
+            axes = getattr(self.graph, attr, None)
+            if axes is not None and axes in figure.axes:
+                axes.remove()
+        axes = figure.add_subplot(self.parent.gs0[self.pos])
+        axes.set_xticks([])
+        axes.set_yticks([])
+        axes.text(0.5, 0.5, message,
+                  transform = axes.transAxes, ha = 'center', va = 'center',
+                  wrap = True, color = 'firebrick',
+                  size = self.parent.MainParamDict['NumFontSize'])
+        # Handing the panel these axes keeps the parts of Iseult that only ask
+        # a panel for its axes, e.g. restoring the view, working on an axes
+        # that is really in the current figure.
+        self.graph.axes = axes
 
     def OpenSubplotSettings(self):
 
@@ -253,33 +332,38 @@ class SubPlotWrapper:
 
         self.graph.OpenSettings()
 
+    def CpuDomainLocs(self):
+        '''The CPU boundary locations along the horizontal and vertical axes of
+        this subplot. Which of them is x and which is y depends on the physical
+        axes the panel is plotted against.'''
+        locs = {'x': self.parent.cpu_x_locs, 'y': self.parent.cpu_y_locs,
+                'z': self.parent.cpu_y_locs}
+        horiz, vert = plot_axes.plot_axes_of(self.graph)
+        return (locs.get(horiz, []), locs.get(vert, []))
+
     def SetCpuDomainLines(self):
         '''This function sets the Cpu lines up. It should only be called when
         redrawing the axes and after the axes is creates as it creates all of
         the line objects.'''
 
-        # regardless if it is 1D or 2D we'll show the x_domains...
-        # This could change if we decide to add the ability to show transverse 1D slices
         self.cpu_x_lines = []
         self.cpu_y_lines = []
-        for i in range(len(self.parent.cpu_x_locs)):
-            self.cpu_x_lines.append(self.graph.axes.axvline(self.parent.cpu_x_locs[i], linewidth = 1, linestyle = ':',color = 'w') )
-        if self.GetPlotParam('twoD'):
-            for i in range(len(self.parent.cpu_y_locs)):
-                self.cpu_y_lines.append(self.graph.axes.axhline(self.parent.cpu_y_locs[i], linewidth = 1, linestyle = ':',color = 'w'))
+        horiz_locs, vert_locs = self.CpuDomainLocs()
+        for i in range(len(horiz_locs)):
+            self.cpu_x_lines.append(self.graph.axes.axvline(horiz_locs[i], linewidth = 1, linestyle = ':',color = 'w') )
+        for i in range(len(vert_locs)):
+            self.cpu_y_lines.append(self.graph.axes.axhline(vert_locs[i], linewidth = 1, linestyle = ':',color = 'w'))
 
     def UpdateCpuDomainLines(self):
         '''This updates the location of the Cpu lines. It should only be called
         when refreshing the axes as it requires the line objects to already be
         created.'''
-        # regardless if it is 1D or 2D we'll show the x_domains...
-        # This could change if we decide to add the ability to show transverse 1D slices
+        horiz_locs, vert_locs = self.CpuDomainLocs()
         for i in range(len(self.cpu_x_lines)):
-            self.cpu_x_lines[i].set_xdata([self.parent.cpu_x_locs[i],self.parent.cpu_x_locs[i]])
+            self.cpu_x_lines[i].set_xdata([horiz_locs[i],horiz_locs[i]])
 
-        if self.GetPlotParam('twoD'):
-            for i in range(len(self.parent.cpu_y_locs)):
-                self.cpu_y_lines[i].set_ydata([self.parent.cpu_y_locs[i],self.parent.cpu_y_locs[i]])
+        for i in range(len(self.cpu_y_lines)):
+            self.cpu_y_lines[i].set_ydata([vert_locs[i],vert_locs[i]])
 
 
     def RemoveCpuDomainLines(self):
@@ -1170,7 +1254,9 @@ class SettingsFrame(Tk.Toplevel):
         self.xSliceVarC_omp = Tk.StringVar()
         self.xSliceVarC_omp.set(self.units_listx[self.xSliceVar.get()])
 
-        labelx = ttk.Label(framex, text='x-slice')#
+        # The x-slice fixes where a lineout plotted against y is taken from,
+        # as well as the 2D y-z plane.
+        labelx = ttk.Label(framex, text='x-slice (y lineouts)')#
         labelx.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
 
 
@@ -1202,7 +1288,9 @@ class SettingsFrame(Tk.Toplevel):
         self.ySliceVarC_omp = Tk.StringVar()
         self.ySliceVarC_omp.set(self.units_listy[self.ySliceVar.get()])
 
-        labely = ttk.Label(framey, text='y-slice')#
+        # The y-slice fixes where a lineout plotted against x is taken from,
+        # as well as the 2D x-z plane.
+        labely = ttk.Label(framey, text='y-slice (x lineouts)')#
         labely.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
 
 
@@ -1785,9 +1873,10 @@ class MainApp(Tk.Tk):
         self.cmd_args = cmd_args
 #        if self.cmd_args.r:
 #            self.iconify()
-        # A variable that keeps track of the first graph with spatial x & y axes
-        self.first_x = None
-        self.first_y = None
+        # Maps ('horiz'|'vert', physical axis) onto the axes that every later
+        # panel with that combination shares its limits with. Rebuilt on every
+        # redraw by ReDrawCanvas.
+        self.shared_axes = {}
 
         # An int that stores the current stride
         self.stride = 0
@@ -2849,10 +2938,16 @@ class MainApp(Tk.Tk):
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
                 subplot = self.SubPlotList[i][j]
+                if subplot.draw_failed:
+                    # It has no legend to place, only an error message.
+                    continue
                 if subplot.chartType == 'Moments' or subplot.chartType == 'TotalEnergyPlot':
                     if subplot.GetPlotParam('legend_loc') != 'N/A':
                         tmp_tup = float(subplot.GetPlotParam('legend_loc').split()[0]),float(subplot.GetPlotParam('legend_loc').split()[1])
-                        subplot.graph.legend._set_loc(tmp_tup)
+                        try:
+                            subplot.graph.legend._set_loc(tmp_tup)
+                        except AttributeError:
+                            pass
                 if subplot.chartType == 'SpectraPlot':
                     if subplot.GetPlotParam('T_legend_loc') != 'N/A':
                         tmp_tup = float(subplot.GetPlotParam('T_legend_loc').split()[0]),float(subplot.GetPlotParam('T_legend_loc').split()[1])
@@ -2918,16 +3013,18 @@ class MainApp(Tk.Tk):
                 for i in range(len(cur_view)):
                     is_changed =[]
                     diff_list = []
+                    home_lims = view_limits(home_view[i])
+                    cur_lims = view_limits(cur_view[i])
                     for j in range(4):
-                        num_changed = home_view[i][j]-cur_view[i][j] != 0.0
+                        num_changed = home_lims[j]-cur_lims[j] != 0.0
                         is_changed.append(num_changed)
                         if num_changed:
                             if self.MainParamDict['xLimsRelative'] and j < 2:
                                 #define the difference relative to the shock loc
-                                diff_list.append(cur_view[i][j]-self.shock_loc)
+                                diff_list.append(cur_lims[j]-self.shock_loc)
                             else:
                                 # define the difference relative to the home loc
-                                diff_list.append(cur_view[i][j])
+                                diff_list.append(cur_lims[j])
 
                         else:
                             # They haven't zoomed in, diff should be zero,
@@ -2976,9 +3073,11 @@ class MainApp(Tk.Tk):
             k = 0 # a counter that skips over the colorbars
             for i in range(self.MainParamDict['NumOfRows']):
                 for j in range(self.MainParamDict['NumOfCols']):
-                    tmp_old_view = list(self.old_views.pop(0))
-                    tmp_new_view = list(cur_view[k])
-                    self.SubPlotList[i][j].graph.axes._set_view(cur_view[k])
+                    tmp_old_view = list(view_limits(self.old_views.pop(0)))
+                    tmp_new_view = list(view_limits(cur_view[k]))
+                    # Which of the four limits end up coming from the user's
+                    # own zoom rather than from the panel that was just drawn.
+                    kept = [False, False, False, False]
                     if self.prev_ctype_list[i][j] == self.SubPlotList[i][j].chartType:
                         # see if the view has changed from the home view
                         is_changed = self.is_changed_list[m]
@@ -2986,6 +3085,7 @@ class MainApp(Tk.Tk):
                             # only keep the x values if they have changed
                             for n in range(2):
                                 if is_changed[n]:
+                                    kept[n] = True
                                     if self.SubPlotList[i][j].PlotParamsDict[self.SubPlotList[i][j].chartType]['spatial_x']:
                                         tmp_new_view[n] = tmp_old_view[n]+self.MainParamDict['xLimsRelative']*(self.shock_loc-self.prev_shock_loc)
                                     else:
@@ -2994,6 +3094,7 @@ class MainApp(Tk.Tk):
                             # Keep any y or x that is changed
                             for n in range(4):
                                 if is_changed[n]:
+                                    kept[n] = True
                                     tmp_new_view[n] = tmp_old_view[n]
                                     if n < 2:
                                         if self.SubPlotList[i][j].PlotParamsDict[self.SubPlotList[i][j].chartType]['spatial_x']:
@@ -3001,7 +3102,7 @@ class MainApp(Tk.Tk):
                                         else:
                                             tmp_new_view[n] = tmp_old_view[n]
 
-                    cur_view[k] = tmp_new_view
+                    cur_view[k] = view_from_limits(cur_view[k], tmp_new_view, kept)
 
                     self.SubPlotList[i][j].graph.axes._set_view(cur_view[k])
 
@@ -3128,7 +3229,19 @@ class MainApp(Tk.Tk):
         if keep_view:
             self.SaveView()
 
+        # The toolbar stacks up views keyed by the axes they belong to, using
+        # weak references, so every view it is still holding empties out as
+        # soon as the axes below are thrown away. Left in place, the emptied
+        # home view is what the next SaveView would try to measure the user's
+        # zoom against, and the zoom would be silently lost. The view being
+        # kept has already been read out above, so the stack is dropped here
+        # and rebuilt from the new axes by LoadView.
+        self.toolbar._nav_stack.clear()
+
         self.f.clf()
+        # Which axes are colorbars is worked out as the panels are drawn, and
+        # the axes recorded last time no longer exist.
+        self.cbarList = []
         #
         if self.MainParamDict['ClearFig']:
             self.canvas.draw()
@@ -3138,12 +3251,14 @@ class MainApp(Tk.Tk):
 
         # Calculate the new xmin, and xmax
 
-        # Find the first position with a physical x,y & k axis:
-        self.first_x = None
-        self.first_y = None
+        # Work out which panels share their limits with which. A panel no
+        # longer necessarily has x on its horizontal axis, so panels are
+        # matched up by which physical axis sits where rather than by assuming
+        # the horizontal axis is always x. self.shared_axes holds the first
+        # axes drawn for each ('horiz'|'vert', axis name) combination; every
+        # later panel with the same combination shares its limits with it.
+        self.shared_axes = {}
         self.first_k = None
-        k = 0
-        # find the first spatial x and y
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
 
@@ -3152,33 +3267,13 @@ class MainApp(Tk.Tk):
                     # The plot type is a spectral plot, which has no spatial dim
                     if self.first_k is None:
                         self.first_k = (i,j)
-                elif self.SubPlotList[i][j].chartType == 'SpectraPlot':
-                    # The plot type is a spectral plot, which has no spatial dim
-                    pass
-                elif self.MainParamDict['LinkSpatial'] != 1 and self.SubPlotList[i][j].chartType == 'PhasePlot':
-                    # If this is the case we don't care about the phase plots
-                    # as we don't want to share the axes
-                    pass
-                elif self.MainParamDict['LinkSpatial'] != 1 and self.SubPlotList[i][j].chartType == 'EnergyPlot':
-                    # If this is the case we don't care about the phase plots
-                    # as we don't want to share the axes
-                    pass
-                elif self.MainParamDict['LinkSpatial'] == 3 and self.SubPlotList[i][j].GetPlotParam('twoD'):
-                    # If the plot is twoD share the axes
-                    if self.first_x is None and self.SubPlotList[i][j].GetPlotParam('spatial_x'):
-                        self.first_x = (i,j)
-                    if self.first_y is None and self.SubPlotList[i][j].GetPlotParam('spatial_y'):
-                        self.first_y = (i,j)
 
-                else:
-                    # Just find the first spatial x and y direction.
-                    if self.first_x is None and self.SubPlotList[i][j].GetPlotParam('spatial_x'):
-                        self.first_x = (i,j)
-                    if self.first_y is None and self.SubPlotList[i][j].GetPlotParam('spatial_y'):
-                        self.first_y = (i,j)
+                # Now... We can draw the graph. A panel that fails shows why in
+                # its own cell; the others are drawn as if nothing happened.
+                self.SubPlotList[i][j].DrawGraphSafely()
 
-                # Now... We can draw the graph.
-                self.SubPlotList[i][j].DrawGraph()
+                # ... and let the panels drawn after it share its limits.
+                self.RegisterSharedAxes((i,j))
 
         if self.MainParamDict['ShowTitle']:
             tmpstr = self.PathDict['Prtl'][self.TimeStep.value-1].suffix
@@ -3199,15 +3294,25 @@ class MainApp(Tk.Tk):
 
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
+                if self.SubPlotList[i][j].draw_failed:
+                    # A panel that did not draw has no lines to write to.
+                    continue
                 if self.SubPlotList[i][j].chartType =='PhasePlot' or self.SubPlotList[i][j].chartType =='EnergyPlot':
-                    if self.SubPlotList[i][j].GetPlotParam('show_int_region'):
+                    # The integration region is a range in x, so it only gets
+                    # drawn on panels that are plotted against x.
+                    if self.SubPlotList[i][j].GetPlotParam('show_int_region') \
+                            and plot_axes.shows_axis(self.SubPlotList[i][j].graph, 'x'):
                         self.phase_plot_list.append([i,j])
                 if self.SubPlotList[i][j].chartType =='SpectraPlot':
                     self.spectral_plot_list.append([i,j])
 
         for pos in self.phase_plot_list:
+            if self.SubPlotList[pos[0]][pos[1]].draw_failed:
+                continue
             if self.SubPlotList[pos[0]][pos[1]].GetPlotParam('prtl_type') == 0:
                 for spos in self.spectral_plot_list:
+                    if self.SubPlotList[spos[0]][spos[1]].draw_failed:
+                        continue
                     if self.SubPlotList[spos[0]][spos[1]].GetPlotParam('show_ions'):
                         k = min(self.SubPlotList[spos[0]][spos[1]].graph.spect_num, len(self.dashes_options)-1)
                         # Append the left line to the list
@@ -3225,6 +3330,8 @@ class MainApp(Tk.Tk):
                         self.SubPlotList[pos[0]][pos[1]].graph.IntRegionLines[-1].set_dashes(self.dashes_options[k])
             else:
                 for spos in self.spectral_plot_list:
+                    if self.SubPlotList[spos[0]][spos[1]].draw_failed:
+                        continue
                     if self.SubPlotList[spos[0]][spos[1]].GetPlotParam('show_electrons'):
                         k = min(self.SubPlotList[spos[0]][spos[1]].graph.spect_num, len(self.dashes_options)-1)
                         # Append the left line to the list
@@ -3246,7 +3353,8 @@ class MainApp(Tk.Tk):
         for i in range(self.MainParamDict['NumOfRows']):
             for col in range(self.MainParamDict['NumOfCols']):
                 subplot = self.SubPlotList[i][col]
-                if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None:
+                if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None \
+                        and not subplot.draw_failed:
                     g = subplot.graph
                     if subplot.chartType in ['FieldsPlot', 'DensityPlot']:
                         if hasattr(g, 'GetPlotParam') and g.GetPlotParam("show_vectors"):
@@ -3260,6 +3368,7 @@ class MainApp(Tk.Tk):
                 if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None:
                     subplot.graph._in_refresh = False
 
+        self.AlignSharedAxes()
         self.canvas.draw()
         self.canvas.get_tk_widget().update_idletasks()
 
@@ -3298,13 +3407,13 @@ class MainApp(Tk.Tk):
         self.LoadAllKeys()
 
 
-        # By design, the first_x and first_y cannot change if the graph is
-        # being refreshed. Any call that would require this needs a redraw
+        # By design, which panel owns each shared axis cannot change if the
+        # graph is being refreshed. Any call that would require this needs a redraw
         # Now we refresh the graph.
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
 
-                self.SubPlotList[i][j].RefreshGraph()
+                self.SubPlotList[i][j].RefreshGraphSafely()
 
         if self.MainParamDict['ShowTitle']:
             tmpstr = self.PathDict['Prtl'][self.TimeStep.value-1].suffix
@@ -3316,8 +3425,12 @@ class MainApp(Tk.Tk):
 
         for pos in self.phase_plot_list:
             i = 0
+            if self.SubPlotList[pos[0]][pos[1]].draw_failed:
+                continue
             if self.SubPlotList[pos[0]][pos[1]].GetPlotParam('prtl_type') == 0:
                 for spos in self.spectral_plot_list:
+                    if self.SubPlotList[spos[0]][spos[1]].draw_failed:
+                        continue
                     if self.SubPlotList[spos[0]][spos[1]].GetPlotParam('show_ions'):
                         # Update the left line to the list
                         self.SubPlotList[pos[0]][pos[1]].graph.IntRegionLines[i].set_xdata(
@@ -3331,6 +3444,8 @@ class MainApp(Tk.Tk):
                         i+=1
             else:
                 for spos in self.spectral_plot_list:
+                    if self.SubPlotList[spos[0]][spos[1]].draw_failed:
+                        continue
                     if self.SubPlotList[spos[0]][spos[1]].GetPlotParam('show_electrons'):
                         # Update the left line to the list
                         self.SubPlotList[pos[0]][pos[1]].graph.IntRegionLines[i].set_xdata(
@@ -3347,7 +3462,8 @@ class MainApp(Tk.Tk):
         for i in range(self.MainParamDict['NumOfRows']):
             for col in range(self.MainParamDict['NumOfCols']):
                 subplot = self.SubPlotList[i][col]
-                if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None:
+                if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None \
+                        and not subplot.draw_failed:
                     g = subplot.graph
                     if subplot.chartType in ['FieldsPlot', 'DensityPlot']:
                         if hasattr(g, 'GetPlotParam') and g.GetPlotParam("show_vectors"):
@@ -3361,6 +3477,7 @@ class MainApp(Tk.Tk):
                 if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None:
                     subplot.graph._in_refresh = False
 
+        self.AlignSharedAxes()
         self.canvas.draw()
         self.canvas.get_tk_widget().update_idletasks()
 
@@ -3468,7 +3585,136 @@ class MainApp(Tk.Tk):
     def OpenMovieDialog(self):
         MovieDialog(self)
 
+    def ShouldLinkSpatial(self, subplot):
+        '''Whether `subplot` takes part in the sharing of spatial axes, given
+        the current 'Share spatial axes' setting.'''
+        if subplot.draw_failed:
+            # It is showing an error message, not a coordinate.
+            return False
+        mode = self.MainParamDict['LinkSpatial']
+        if mode == 0: # 'None'
+            return False
+        if mode != 1 and subplot.chartType in ['PhasePlot', 'EnergyPlot']:
+            # 'All non p-x' and 'All 2-D spatial' leave the phase-space panels
+            # with limits of their own
+            return False
+        if mode == 3 and not subplot.GetPlotParam('twoD'):
+            # 'All 2-D spatial'
+            return False
+        if subplot.chartType in ['SpectraPlot', 'FFTPlots', 'TotalEnergyPlot']:
+            # These have no spatial axis at all
+            return False
+        return True
+
+    def GetSharedAxes(self, pos):
+        '''The (sharex, sharey) axes the subplot at `pos` should be created
+        with, or None where it has nothing to share limits with.
+
+        A panel only shares an axis with a panel that has the same physical
+        coordinate in the same place, so a panel plotted against y does not
+        inherit the limits of one plotted against x.'''
+        subplot = self.SubPlotList[pos[0]][pos[1]]
+        if not self.ShouldLinkSpatial(subplot):
+            return None, None
+        horiz, vert = plot_axes.plot_axes_of(subplot.graph)
+        share_x = self.shared_axes.get(('horiz', horiz)) if horiz is not None else None
+        share_y = self.shared_axes.get(('vert', vert)) if vert is not None else None
+        return share_x, share_y
+
+    def RegisterSharedAxes(self, pos):
+        '''Record the axes of the subplot at `pos` as the one that later
+        subplots with the same physical axes share their limits with.'''
+        subplot = self.SubPlotList[pos[0]][pos[1]]
+        if not self.ShouldLinkSpatial(subplot):
+            return
+        axes = getattr(subplot.graph, 'axes', None)
+        if axes is None:
+            return
+        horiz, vert = plot_axes.plot_axes_of(subplot.graph)
+        if horiz is not None:
+            self.shared_axes.setdefault(('horiz', horiz), axes)
+        if vert is not None:
+            self.shared_axes.setdefault(('vert', vert), axes)
+
+    def SpatialAxisGroups(self):
+        '''The panels grouped by which physical coordinate sits on which plot axis.
+
+        Returns {('horiz'|'vert', axis name): [graph, ...]}, using the same
+        rules as the limit sharing, so a group is exactly the set of panels
+        that are meant to line up with one another.'''
+        groups = {}
+        for i in range(self.MainParamDict['NumOfRows']):
+            for j in range(self.MainParamDict['NumOfCols']):
+                subplot = self.SubPlotList[i][j]
+                if not self.ShouldLinkSpatial(subplot):
+                    continue
+                graph = subplot.graph
+                if getattr(graph, 'axes', None) is None:
+                    continue
+                horiz, vert = plot_axes.plot_axes_of(graph)
+                if horiz is not None:
+                    groups.setdefault(('horiz', horiz), []).append(graph)
+                if vert is not None:
+                    groups.setdefault(('vert', vert), []).append(graph)
+        return groups
+
+    def AlignSharedAxes(self):
+        '''Give panels that show the same physical coordinate the same scale.
+
+        Matching limits is not enough on its own: with 'Aspect = 1' matplotlib
+        shrinks a 2D panel's box to keep its pixels square, so the same range
+        of, say, y would be drawn across a different width than in a lineout
+        and the two would not line up. Every panel in a group is therefore
+        squeezed to the narrowest box in that group, so that equal limits
+        really do mean equal scale.
+
+        Panels whose aspect matplotlib controls set the target and are left
+        alone; the rest are resized around the middle of their own grid cell,
+        which is where matplotlib anchors an aspect-constrained panel too.'''
+        groups = self.SpatialAxisGroups()
+        if not groups:
+            return
+
+        all_graphs = {id(g): g for members in groups.values() for g in members}.values()
+        if not any(g.axes.get_aspect() != 'auto' for g in all_graphs):
+            # Every box is the full grid cell, so the scales already match.
+            return
+
+        # Start from the untouched grid cells so that repeated calls do not
+        # shrink the panels a little further each time.
+        for graph in all_graphs:
+            spec = graph.axes.get_subplotspec()
+            if spec is not None:
+                graph.axes.set_position(spec.get_position(self.f))
+        # Laying the figure out is what makes matplotlib work out the
+        # aspect-locked boxes; it does not need to be rasterized to do that.
+        try:
+            self.f.draw_without_rendering()
+        except AttributeError:
+            self.canvas.draw()
+
+        for (side, _axis), members in groups.items():
+            free = [g for g in members if g.axes.get_aspect() == 'auto']
+            if len(free) == len(members):
+                continue # nothing is constraining this group
+            if side == 'horiz':
+                target = min(g.axes.get_position().width for g in members)
+            else:
+                target = min(g.axes.get_position().height for g in members)
+            for graph in free:
+                box = graph.axes.get_position()
+                if side == 'horiz':
+                    graph.axes.set_position([box.x0 + (box.width - target)/2, box.y0,
+                                             target, box.height])
+                else:
+                    graph.axes.set_position([box.x0, box.y0 + (box.height - target)/2,
+                                             box.width, target])
+
     def get_active_viewport(self):
+        '''The spatial region shown by the first 2D spatial panel, as a tuple
+        of (physical axis, low, high) triples. Panels that select particles by
+        region use this, so it is given in physical coordinates rather than as
+        the plot's own x and y limits, which may be swapped by a rotation.'''
         if not hasattr(self, 'SubPlotList') or self.SubPlotList is None:
             return None
         for i in range(self.MainParamDict['NumOfRows']):
@@ -3478,15 +3724,17 @@ class MainApp(Tk.Tk):
                 if j >= len(self.SubPlotList[i]):
                     continue
                 subplot = self.SubPlotList[i][j]
+                if subplot.draw_failed:
+                    # Its axes hold an error message, not a region of the domain.
+                    continue
                 if subplot.chartType in ['FieldsPlot', 'DensityPlot', 'MagPlots', 'Moments']:
                     if subplot.graph and subplot.graph.GetPlotParam('twoD'):
                         if hasattr(subplot.graph, 'axes') and subplot.graph.axes is not None:
+                            horiz, vert = plot_axes.plot_axes_of(subplot.graph)
                             xlim = subplot.graph.axes.get_xlim()
                             ylim = subplot.graph.axes.get_ylim()
-                            plane = self.MainParamDict['2DSlicePlane']
-                            xlim_min, xlim_max = min(xlim), max(xlim)
-                            ylim_min, ylim_max = min(ylim), max(ylim)
-                            return (xlim_min, xlim_max, ylim_min, ylim_max, plane)
+                            return ((horiz, min(xlim), max(xlim)),
+                                    (vert, min(ylim), max(ylim)))
         return None
 
     def is_viewport_zoomed(self):
@@ -3673,7 +3921,8 @@ class MainApp(Tk.Tk):
         # than half max
         ishock_final = np.where(dens_arr[dens_arr.shape[0]//2,jstart:]>=dens_half_max)[0][-1]
         xshock_final = xaxis_final[ishock_final]
-        self.shock_speed = xshock_final/final_time
+        # Avoid inf/NaN when the last output is at t=0 (e.g. only one dump)
+        self.shock_speed = xshock_final/final_time if final_time > 0 else 0.0
         self.prev_shock_loc = np.nan
 
     def setKnob(self, value):

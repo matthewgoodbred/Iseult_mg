@@ -8,6 +8,7 @@ import new_cmaps
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
+import plot_axes
 
 class EnergyPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -36,6 +37,9 @@ class EnergyPanel:
                        'interpolation': 'nearest',
                        'face_color': 'gainsboro'}
 
+    # An energy plot is drawn as an image, but only its horizontal axis is
+    # spatial, so it opts out of the default 2D axis handling.
+    plot_axes.add_axis_params(plot_param_dict, two_d=False)
 
     prtl_opts = ['proton', 'electron']
     gradient =  np.linspace(0, 1, 256)# A way to make the colorbar display better
@@ -69,7 +73,9 @@ class EnergyPanel:
         # This should only be called by the user-interactio when all the plots already exist...
         # so we can take some shortcuts and assume a lot of things are already created.
         self.SetPlotParam('show_int_region', self.IntRegVar.get(), update_plot = False)
-        if self.IntRegVar.get() == True:
+        # The spectral integration region is a range in x, so it means nothing
+        # on a panel plotted against another axis.
+        if self.IntRegVar.get() == True and plot_axes.shows_axis(self, 'x'):
             # We need to show the integration region.
 
             # Look for all the spectra plots and plot the lines.
@@ -117,6 +123,24 @@ class EnergyPanel:
     def ChangePlotType(self, str_arg):
         self.FigWrap.ChangeGraph(str_arg)
 
+    def positions(self, prtl_type):
+        '''The particle positions the histogram runs along, in c/omega_pe.
+
+        Falls back to x if the data does not hold the chosen coordinate, which
+        is the case for a 1D run.
+        '''
+        axis = plot_axes.plot_axis_name(self)
+        coord = plot_axes.load_positions(self, prtl_type, axis)
+        if coord is None and axis != 'x':
+            self.SetPlotParam('plot_axis', 0, update_plot = False)
+            self.prof_axis = 'x'
+            coord = plot_axes.load_positions(self, prtl_type, 'x')
+        return coord
+
+    def spatial_plot_axes(self):
+        '''The physical axes of this panel: the energy axis is not one.'''
+        return plot_axes.plot_axis_name(self), None
+
     def norm(self, vmin=None,vmax=None):
         if self.GetPlotParam('cnorm_type') == 'Log':
             return  mcolors.LogNorm(vmin, vmax)
@@ -146,6 +170,14 @@ class EnergyPanel:
             self.arrs_needed.append('ve')
             self.arrs_needed.append('we')
 
+        # The coordinate the histogram runs along, plus x, which still places
+        # the shock and the spectral integration region.
+        prtl_type = self.GetPlotParam('prtl_type')
+        for key in plot_axes.available_position_keys(self, prtl_type,
+                                                    sorted({'x', plot_axes.plot_axis_name(self)})):
+            if key not in self.arrs_needed:
+                self.arrs_needed.append(key)
+
         return self.arrs_needed
 
     def LoadData(self):
@@ -160,6 +192,7 @@ class EnergyPanel:
             self.key_name += 'weighted_'
 
         self.key_name += self.prtl_opts[self.GetPlotParam('prtl_type')]
+        self.key_name += '_vs' + plot_axes.plot_axis_name(self)
 
         if self.key_name in self.parent.DataDict.keys():
             self.hist2d = self.parent.DataDict[self.key_name]
@@ -171,11 +204,12 @@ class EnergyPanel:
             self.weights = None
             self.x_values = None
             self.y_values = None
+            self.prof_axis = plot_axes.plot_axis_name(self)
 
             # Choose the particle type and px, py, or pz
             if self.GetPlotParam('prtl_type') == 0: #protons
                 self.energy_color = self.parent.ion_color
-                self.x_values = self.FigWrap.LoadKey('xi')/self.c_omp
+                self.x_values = self.positions(0)
                 if self.GetPlotParam('weighted'):
                     self.weights = self.FigWrap.LoadKey('chi')
 
@@ -185,7 +219,7 @@ class EnergyPanel:
 
             if self.GetPlotParam('prtl_type') == 1: #electons
                 self.energy_color = self.parent.electron_color
-                self.x_values = self.FigWrap.LoadKey('xe')/self.c_omp
+                self.x_values = self.positions(1)
 
                 if self.GetPlotParam('weighted'):
                     self.weights = self.FigWrap.LoadKey('che')
@@ -201,7 +235,7 @@ class EnergyPanel:
             self.Ymax = self.Ymax if ( self.Ymin != self.Ymax ) else self.Ymin+1
 
             self.xmin = 0
-            self.xmax = self.FigWrap.LoadKey('bx').shape[2]/self.c_omp*self.istep
+            self.xmax = plot_axes.domain_extent(self, self.prof_axis)
             self.xmax = self.xmax if ( self.xmin != self.xmax ) else self.xmin+1
 
             self.hist2d = np.histogram2d(self.y_values, self.x_values,
@@ -209,22 +243,29 @@ class EnergyPanel:
                             range = [[self.Ymin,self.Ymax],[0,self.xmax]],
                             weights = self.weights)
 
-            if self.GetPlotParam('masked'):
-                zval = ma.masked_array(self.hist2d[0])
-                zval[zval <= 0] = ma.masked
-                zval *= float(zval.max())**(-1)
-                tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
-            else:
-                zval = np.copy(self.hist2d[0])
-                zval[zval==0] = 0.5
-                zval *= float(zval.max())**(-1)
-                tmplist = [zval.min(), zval.max()]
+            # No particle need fall inside the binned range, e.g. when a
+            # small region has been selected in a 2D panel, and then there is
+            # nothing to take a min or a max of.
+            try:
+                if self.GetPlotParam('masked'):
+                    zval = ma.masked_array(self.hist2d[0])
+                    zval[zval <= 0] = ma.masked
+                    zval *= float(zval.max())**(-1)
+                    tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
+                else:
+                    zval = np.copy(self.hist2d[0])
+                    zval[zval==0] = 0.5
+                    zval *= float(zval.max())**(-1)
+                    tmplist = [zval.min(), zval.max()]
+            except ValueError:
+                tmplist = [0.1, 1]
 
             self.hist2d = zval, self.hist2d[1], self.hist2d[2], tmplist
             self.parent.DataDict[self.key_name] = self.hist2d
 
     def UpdateLabelsandColors(self):
-        self.x_label = r'$x\ [c/\omega_{\rm pe}]$'
+        self.prof_axis = plot_axes.plot_axis_name(self)
+        self.x_label = plot_axes.AXIS_LABELS[self.prof_axis]
 
         if self.GetPlotParam('prtl_type') == 0: #protons
             self.energy_color = self.parent.ion_color
@@ -268,13 +309,10 @@ class EnergyPanel:
 
         self.gs = gridspec.GridSpecFromSubplotSpec(100,100, subplot_spec = self.parent.gs0[self.FigWrap.pos])#, bottom=0.2,left=0.1,right=0.95, top = 0.95)
 
-        if self.parent.MainParamDict['LinkSpatial'] == 1:
-            if self.FigWrap.pos == self.parent.first_x:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
-            else:
-                self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]], sharex = self.parent.SubPlotList[self.parent.first_x[0]][self.parent.first_x[1]].graph.axes)
-        else:
-            self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]])
+        # An energy plot only shares the spatial axis it is plotted against.
+        share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
+        self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
+                                           sharex = share_x_ax)
         self.cax = self.axes.imshow(self.hist2d[0],
                                     cmap = new_cmaps.cmaps[self.parent.MainParamDict['ColorMap']],
                                     norm = self.norm(), origin = 'lower',
@@ -285,9 +323,9 @@ class EnergyPanel:
 
         self.cax.set_clim(self.clim)
 
-        self.shock_line = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
+        self.shock_line = plot_axes.add_marker_line(self, 'x', self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                    PathEffects.Normal()])
-        if not self.GetPlotParam('show_shock'):
+        if not (self.GetPlotParam('show_shock') and plot_axes.shows_axis(self, 'x')):
             self.shock_line.set_visible(False)
 
         self.axC = self.figure.add_subplot(self.gs[self.parent.cbar_extent[0]:self.parent.cbar_extent[1], self.parent.cbar_extent[2]:self.parent.cbar_extent[3]])
@@ -379,7 +417,7 @@ class EnergyPanel:
         if self.GetPlotParam('show_cbar'):
             self.CbarTickFormatter()
         if self.GetPlotParam('show_shock'):
-            self.shock_line.set_xdata([self.parent.shock_loc,self.parent.shock_loc])
+            plot_axes.move_marker_line(self, self.shock_line, 'x', self.parent.shock_loc)
 
         self.UpdateLabelsandColors()
         self.axes.set_xlabel(self.x_label, labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
@@ -391,12 +429,8 @@ class EnergyPanel:
             self.ymax = self.GetPlotParam('y_max')
         self.axes.set_ylim(self.ymin, self.ymax)
 
-        if self.parent.MainParamDict['SetxLim'] and self.parent.MainParamDict['LinkSpatial'] == 1:
-            if self.parent.MainParamDict['xLimsRelative']:
-                self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
-                                   self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
-            else:
-                self.axes.set_xlim(self.parent.MainParamDict['xLeft'], self.parent.MainParamDict['xRight'])
+        if self.parent.MainParamDict['LinkSpatial'] == 1:
+            plot_axes.apply_limits(self, (self.xmin, self.xmax))
         else:
             self.axes.set_xlim(self.xmin,self.xmax)
 
@@ -450,8 +484,8 @@ class EnergyPanel:
     def GetPlotParam(self, keyname):
         return self.FigWrap.GetPlotParam(keyname)
 
-    def SetPlotParam(self, keyname, value,  update_plot = True):
-        self.FigWrap.SetPlotParam(keyname, value,  update_plot = update_plot)
+    def SetPlotParam(self, keyname, value,  update_plot = True, NeedsRedraw = False):
+        self.FigWrap.SetPlotParam(keyname, value,  update_plot = update_plot, NeedsRedraw = NeedsRedraw)
 
     def OpenSettings(self):
         if self.settings_window is None:
@@ -547,6 +581,8 @@ class EnergySettings(Tk.Toplevel):
                         self.parent.SetPlotParam('masked', self.MaskVar.get()))
         cb.grid(row = 8, sticky = Tk.W)
 
+        plot_axes.add_axis_buttons(frm, self, self.parent, row=9, column=0, columnspan=2, two_d=False)
+
 
 #        ttk.Label(frm, text = 'If the zero values are not masked they are set to z_min/2').grid(row =9, columnspan =2)
     # Define functions for the events
@@ -617,7 +653,7 @@ class EnergySettings(Tk.Toplevel):
         if self.parent.GetPlotParam('show_shock')== self.ShockVar.get():
             pass
         else:
-            self.parent.shock_line.set_visible(self.ShockVar.get())
+            self.parent.shock_line.set_visible(self.ShockVar.get() and plot_axes.shows_axis(self.parent, 'x'))
             self.parent.SetPlotParam('show_shock', self.ShockVar.get())
 
 
