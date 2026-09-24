@@ -33,6 +33,21 @@ interpolated to each particle's position:
 The perpendicular vectors are summed in the lab basis, so e.g. |<beta_perp>|
 is the magnitude of the mean perpendicular drift (the E x B drift for a
 magnetized plasma), not the mean of the magnitudes.
+
+The field-aligned pass also sums the fields at the particles, sum w B_i and
+sum w E_i, so that the mean field in each bin is known. The rest-frame pressure
+tensor needs it: that tensor is only defined once the bin has been averaged
+over, so it is projected onto the bin's mean field as seen in the rest frame.
+
+The rest-frame pressure tensor P^ij and temperature P^ij / n are worked out
+from the binned lab-frame N^mu and T^munu (see `rest_frame_pressure`), in one
+of two rest frames:
+
+    Eckart   U^mu = N^mu / n,  n = sqrt(-N.N)    no particle flux
+    Landau   T^mu_nu U^nu = -e U^mu               no energy flux
+
+The two differ when there is heat flux, e.g. for two species streaming
+through each other, or a beam through a background.
 """
 import math
 import os
@@ -49,8 +64,9 @@ from numba import njit, prange, get_num_threads, set_num_threads
 N_, BX, BY, BZ, G_, UX, UY, UZ, TXX, TYY, TZZ, TXY, TXZ, TYZ = range(14)
 N_LAB = 14
 (BPAR, BPERPX, BPERPY, BPERPZ, UPAR, UPERPX, UPERPY, UPERPZ,
- TPARPAR, TPERPPERP, TPARPERPX, TPARPERPY, TPARPERPZ) = range(14, 27)
-N_FIELD_ALIGNED = 27
+ TPARPAR, TPERPPERP, TPARPERPX, TPARPERPY, TPARPERPZ,
+ FBX, FBY, FBZ, FEX, FEY, FEZ) = range(14, 33)
+N_FIELD_ALIGNED = 33
 
 # The largest per-thread scratch space the particle pass may use, in bytes.
 # Each thread bins its share of the particles into a private copy of the
@@ -97,8 +113,8 @@ def _trilinear(arr, k0, k1, tk, j0, j1, tj, i0, i1, ti):
 @njit(parallel=True, cache=True)
 def _accumulate(h, v, h0, inv_dh, nh, v0, inv_dv, nv, two_d,
                 u, vv, w, wts, mask,
-                field_aligned, px, py, pz, pconst, bxg, byg, bzg, inv_istep,
-                n_chunks):
+                field_aligned, px, py, pz, pconst, bxg, byg, bzg,
+                has_e, exg, eyg, ezg, inv_istep, n_chunks):
     n = u.shape[0]
     nacc = N_FIELD_ALIGNED if field_aligned else N_LAB
     nbins = nh * nv
@@ -160,6 +176,13 @@ def _accumulate(h, v, h0, inv_dh, nh, v0, inv_dv, nv, two_d,
                 bfx = _trilinear(bxg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
                 bfy = _trilinear(byg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
                 bfz = _trilinear(bzg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
+                acc[b, FBX] += wt * bfx
+                acc[b, FBY] += wt * bfy
+                acc[b, FBZ] += wt * bfz
+                if has_e:
+                    acc[b, FEX] += wt * _trilinear(exg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
+                    acc[b, FEY] += wt * _trilinear(eyg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
+                    acc[b, FEZ] += wt * _trilinear(ezg, k0, k1, tk, j0, j1, tj, i0, i1, ti)
                 bmag = math.sqrt(bfx * bfx + bfy * bfy + bfz * bfz)
                 if bmag > 0.0:
                     hx = bfx / bmag
@@ -228,7 +251,7 @@ def _n_chunks(n, nbins, nacc):
 
 def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
                 weights=None, mask=None, bfield=None, positions=None,
-                istep=1.0, fallback_position=(0.0, 0.0, 0.0)):
+                istep=1.0, fallback_position=(0.0, 0.0, 0.0), efield=None):
     '''Bin every moment of one particle species in a single pass.
 
     Parameters
@@ -250,6 +273,10 @@ def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
         The magnetic field on the (z, y, x) output grid. When given, the
         field-aligned sums are accumulated as well, with the field
         interpolated to each particle.
+    efield : (ex, ey, ez), optional
+        The electric field on the same grid as `bfield`, in the same units.
+        Only its mean over each bin is used, to find the magnetic field in
+        the rest frame. Taken to be zero if not given.
     positions : (x, y, z), optional
         Particle positions in cells, used to interpolate `bfield`. An entry may
         be None for a coordinate the data does not hold, in which case the
@@ -283,6 +310,13 @@ def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
     else:
         bxg = byg = bzg = _EMPTY_GRID
         px = py = pz = _EMPTY_F
+    has_e = field_aligned and efield is not None
+    if has_e:
+        exg, eyg, ezg = (np.ascontiguousarray(e, dtype=np.float32) for e in efield)
+        if any(e.shape != bxg.shape for e in (exg, eyg, ezg)):
+            raise ValueError('The electric and magnetic fields must be on the same grid.')
+    else:
+        exg = eyg = ezg = _EMPTY_GRID
     pconst = np.asarray(fallback_position, dtype=np.float64)
 
     nacc = N_FIELD_ALIGNED if field_aligned else N_LAB
@@ -295,7 +329,7 @@ def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
                            float(v_range[0]), inv_dv, nv, two_d,
                            u, v, w, wts, msk,
                            field_aligned, px, py, pz, pconst, bxg, byg, bzg,
-                           1.0 / float(istep), n_chunks)
+                           has_e, exg, eyg, ezg, 1.0 / float(istep), n_chunks)
     finally:
         set_num_threads(threads_before)
     sums = sums.T  # (nacc, nbins)
@@ -312,12 +346,22 @@ def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
 
 # The index of each family is the panel's legacy 'm_type', so that configs
 # saved before the stress-energy tensor existed still show the same thing.
-FAMILIES = ('beta', 'u', 'energy', 'T')
+FAMILIES = ('beta', 'u', 'energy', 'T', 'P', 'Theta')
 
 FAMILY_NAMES = {'beta': '3-velocity  <β>',
-                'u': '4-velocity  <uᵘ> = <γ(1, β)>',
+                'u': '4-velocity  <u^μ> = <γ(1, β)>',
                 'energy': 'Energy',
-                'T': 'Stress-energy tensor  Tᵘᵛ'}
+                'T': 'Stress-energy tensor  T^μν',
+                'P': "Rest-frame pressure  P'^ij",
+                'Theta': "Rest-frame temperature  Θ'^ij = P'^ij / n'"}
+
+# The families that are worked out in the plasma rest frame, and so depend on
+# which rest frame is picked
+REST_FRAME_FAMILIES = ('P', 'Theta')
+
+FRAMES = ('eckart', 'landau')
+FRAME_NAMES = {'eckart': 'Eckart  (no number flux)',
+               'landau': 'Landau  (no energy flux)'}
 
 BASES = ('lab', 'fa')
 BASIS_NAMES = {'lab': 'Lab  (x, y, z)',
@@ -328,6 +372,10 @@ SPATIAL = {'lab': ('x', 'y', 'z'), 'fa': ('par', 'perp')}
 
 # Scalars that do not depend on the basis, shown under the tensor grid
 T_INVARIANTS = ('trace', 'e_rest', 'p_rest')
+P_INVARIANTS = ('scalar',)
+# The temperature anisotropy of the field-aligned basis. The ratio is the same
+# for the pressure and the temperature, as the density cancels.
+ANISOTROPY = ('par_over_perp', 'perp_over_par')
 
 
 def tensor_key(a, b, basis):
@@ -345,10 +393,17 @@ def components(family, basis):
         return ['t'] + list(SPATIAL[basis])
     if family == 'energy':
         return ['ke', 'thermal', 'gamma_bulk']
-    idx = ('0',) + SPATIAL[basis]
+    if family in REST_FRAME_FAMILIES:
+        idx = SPATIAL[basis]
+        invariants = P_INVARIANTS
+    else:
+        idx = ('0',) + SPATIAL[basis]
+        invariants = T_INVARIANTS
     comps = [tensor_key(idx[i], idx[j], basis)
              for i in range(len(idx)) for j in range(i, len(idx))]
-    return comps + list(T_INVARIANTS)
+    if family in REST_FRAME_FAMILIES and basis == 'fa':
+        comps += list(ANISOTROPY)
+    return comps + list(invariants)
 
 
 def default_components(family, basis):
@@ -356,7 +411,9 @@ def default_components(family, basis):
     return {'beta': ['x'] if basis == 'lab' else ['par'],
             'u': ['x'] if basis == 'lab' else ['par'],
             'energy': ['ke'],
-            'T': ['00']}[family]
+            'T': ['00'],
+            'P': ['scalar'],
+            'Theta': ['scalar']}[family]
 
 
 def needs_field(family, comp):
@@ -378,16 +435,20 @@ def _split_tensor(comp):
 def ui_label(family, comp):
     '''A short plain-text name for a settings-window widget.'''
     special = {'mag': '|β|' if family == 'beta' else '|u|',
-               't': 'γ = uᵗ',
+               't': 'γ = u^t',
                'ke': 'Kinetic  <γ-1>',
                'thermal': "Thermal, rest frame  <γ'-1>",
                'gamma_bulk': 'Bulk Lorentz factor  Γ',
                'trace': 'Tr(Tij)/3  (mean pressure)',
                'e_rest': "e'  (rest-frame energy density)",
                'p_rest': "P'  (rest-frame pressure)"}
+    if comp in ANISOTROPY:
+        return {'par_over_perp': 'T∥ / T⊥', 'perp_over_par': 'T⊥ / T∥'}[comp]
+    if family in REST_FRAME_FAMILIES and comp == 'scalar':
+        return "Tr/3  (scalar P')" if family == 'P' else "Tr/3  (scalar Θ')"
     if comp in special:
         return special[comp]
-    if family == 'T':
+    if family in ('T',) + REST_FRAME_FAMILIES:
         a, b = _split_tensor(comp)
         return _UI_INDEX[a] + _UI_INDEX[b]
     return {'par': '∥', 'perp': '|⊥|'}.get(comp, comp)
@@ -414,6 +475,22 @@ def tex_label(family, comp, mass_weight=False):
         return {'ke': r'\langle\gamma-1\rangle',
                 'thermal': r"\langle\gamma'-1\rangle",
                 'gamma_bulk': r'\Gamma'}[comp]
+    if comp == 'par_over_perp':
+        return r'T_\parallel/T_\perp'
+    if comp == 'perp_over_par':
+        return r'T_\perp/T_\parallel'
+    if family in REST_FRAME_FAMILIES:
+        sym = 'P' if family == 'P' else r'\Theta'
+        if comp == 'scalar':
+            return sym
+        if comp == 'parpar':
+            return sym + r'_\parallel'
+        if comp == 'perpperp':
+            return sym + r'_\perp'
+        if comp == 'parperp':
+            return '|' + sym + r'_{\parallel\perp}|'
+        a, b = _split_tensor(comp)
+        return sym + '_{%s%s}' % (a, b)
     if comp == 'trace':
         return r'T^{i}_{\ i}/3'
     if comp == 'e_rest':
@@ -479,8 +556,149 @@ def _rest_frame(num, mass):
     return n_rest, e_rest
 
 
+# The metric, diag(-1, 1, 1, 1)
+_ETA = np.array([-1.0, 1.0, 1.0, 1.0])
+_LAB_INDEX = {'x': 0, 'y': 1, 'z': 2}
+
+
+def _lab_tensor(mass):
+    '''T^munu in every bin, as an array of shape (bins..., 4, 4).'''
+    t = mass
+    rows = ((G_, UX, UY, UZ),
+            (UX, TXX, TXY, TXZ),
+            (UY, TXY, TYY, TYZ),
+            (UZ, TXZ, TYZ, TZZ))
+    return np.stack([np.stack([t[k] for k in row], axis=-1) for row in rows], axis=-2)
+
+
+def _number_flux(num):
+    '''N^mu in every bin, as an array of shape (bins..., 4).'''
+    return np.stack([num[N_], num[BX], num[BY], num[BZ]], axis=-1)
+
+
+def frame_velocity(num, mass, frame):
+    '''The 4-velocity U^mu of the plasma rest frame in every bin, shape
+    (bins..., 4), and the number of particles in the bin as counted in that
+    frame, n = -N.U (so n / volume is the rest-frame density).
+
+    frame 'eckart' is the frame with no particle flux, U = N / sqrt(-N.N).
+    frame 'landau' is the frame with no energy flux, U the timelike
+    eigenvector of T^mu_nu. For a physical T^munu (a sum over particles of
+    m u^mu u^nu / gamma) that is the eigenvector with the only negative
+    eigenvalue, -e.
+
+    Bins where the frame is not defined, e.g. empty ones, are NaN.'''
+    N = _number_flux(num)
+    if frame == 'eckart':
+        n = np.sqrt(np.maximum(N[..., 0] ** 2 - np.sum(N[..., 1:] ** 2, axis=-1), 0.0))
+        with np.errstate(invalid='ignore', divide='ignore'):
+            U = N / n[..., None]
+        U[~(n > 0)] = np.nan
+        return U, np.where(n > 0, n, np.nan)
+    if frame != 'landau':
+        raise KeyError(frame)
+
+    M = _lab_tensor(mass) * _ETA  # T^mu_nu
+    valid = np.all(np.isfinite(M), axis=(-2, -1)) & (num[N_] > 0) & (mass[G_] > 0)
+    # Something harmless to diagonalize in the bins that are not valid
+    M = np.where(valid[..., None, None], M, np.diag(-_ETA))
+    lam, vec = np.linalg.eig(M)
+    k = np.argmin(lam.real, axis=-1)
+    v = np.take_along_axis(vec.real, k[..., None, None], axis=-1)[..., 0]
+    norm2 = v[..., 0] ** 2 - np.sum(v[..., 1:] ** 2, axis=-1)
+    valid &= norm2 > 0
+    with np.errstate(invalid='ignore', divide='ignore'):
+        U = v * (np.sign(v[..., 0]) / np.sqrt(np.where(valid, norm2, np.nan)))[..., None]
+    U[~valid] = np.nan
+    n = N[..., 0] * U[..., 0] - np.sum(N[..., 1:] * U[..., 1:], axis=-1)
+    return U, np.where(valid & (n > 0), n, np.nan)
+
+
+def boost_to_rest(U):
+    '''The pure boost Lambda^mu_nu that takes the lab frame to the frame
+    moving with 4-velocity U, shape (bins..., 4, 4). Its spatial axes are
+    the lab x, y and z, boosted without a rotation.'''
+    g = U[..., 0]
+    u = U[..., 1:]
+    L = np.empty(U.shape + (4,))
+    L[..., 0, 0] = g
+    L[..., 0, 1:] = -u
+    L[..., 1:, 0] = -u
+    with np.errstate(invalid='ignore', divide='ignore'):
+        L[..., 1:, 1:] = np.eye(3) + u[..., :, None] * u[..., None, :] / (g + 1.0)[..., None, None]
+    return L
+
+
+def rest_frame_pressure(num, mass, frame):
+    '''The pressure tensor in the rest frame, as a sum over the bin.
+
+    Returns (P, n, U, L): P^ij in the rest frame, shape (bins..., 3, 3); the
+    rest-frame particle count n; the frame's 4-velocity U; and the boost L into it.
+
+    In the rest frame T'^munu = e U'U' + P' + q'U' + U'q' with U' = (1, 0), so
+    P'^ij is simply the spatial part of the boosted T'^munu. In the Landau frame
+    the energy flux q' vanishes, in the Eckart frame it is the heat flux.'''
+    U, n = frame_velocity(num, mass, frame)
+    L = boost_to_rest(U)
+    T = np.einsum('...ma,...ab,...nb->...mn', L, _lab_tensor(mass), L)
+    return T[..., 1:, 1:], n, U, L
+
+
+def rest_frame_field_direction(num, U, L):
+    '''The direction of the mean magnetic field of each bin as seen in the
+    rest frame, as a unit 3-vector in the rest frame's (boosted x, y, z) axes.
+
+    The field the plasma sees is the 4-vector b^mu = -*F^munu U_nu, which in
+    terms of the lab fields and U = (gamma, u) is
+        b^mu = (u . B,  gamma B - u x E),
+    and is orthogonal to U, so it is purely spatial in the rest frame.
+    It needs the field sums of the field-aligned pass. Bins with no field are NaN.'''
+    if num.shape[0] < N_FIELD_ALIGNED:
+        raise ValueError('The field-aligned basis needs the field-aligned particle pass.')
+    count = num[N_]
+    with np.errstate(invalid='ignore', divide='ignore'):
+        B = np.stack([num[FBX], num[FBY], num[FBZ]], axis=-1) / count[..., None]
+        E = np.stack([num[FEX], num[FEY], num[FEZ]], axis=-1) / count[..., None]
+    g = U[..., 0]
+    u = U[..., 1:]
+    b4 = np.concatenate([np.sum(u * B, axis=-1)[..., None],
+                         g[..., None] * B - np.cross(u, E)], axis=-1)
+    b_rest = np.einsum('...ma,...a->...m', L, b4)[..., 1:]
+    mag = np.sqrt(np.sum(b_rest ** 2, axis=-1))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        bhat = b_rest / mag[..., None]
+    bhat[~(mag > 0)] = np.nan
+    return bhat
+
+
+def pressure_component(P, comp, bhat=None):
+    '''One component of a (bins..., 3, 3) tensor: a lab-axis one such as 'xy',
+    'scalar' (a third of the trace), or, given the field direction `bhat`,
+    'parpar', 'perpperp' (per perpendicular direction) or 'parperp' (the
+    magnitude of the parallel-perpendicular part).'''
+    trace = P[..., 0, 0] + P[..., 1, 1] + P[..., 2, 2]
+    if comp == 'scalar':
+        return trace / 3.0
+    if comp in ANISOTROPY:
+        ppar = pressure_component(P, 'parpar', bhat)
+        pperp = pressure_component(P, 'perpperp', bhat)
+        if comp == 'par_over_perp':
+            return _safe_div(ppar, pperp)
+        return _safe_div(pperp, ppar)
+    if comp in ('parpar', 'perpperp', 'parperp'):
+        Pb = np.einsum('...ij,...j->...i', P, bhat)
+        ppar = np.sum(bhat * Pb, axis=-1)
+        if comp == 'parpar':
+            return ppar
+        if comp == 'perpperp':
+            return (trace - ppar) / 2.0
+        return np.sqrt(np.sum((Pb - ppar[..., None] * bhat) ** 2, axis=-1))
+    a, b = _split_tensor(comp)
+    return P[..., _LAB_INDEX[a], _LAB_INDEX[b]]
+
+
 def evaluate(num, mass, family, comp, normalization='density',
-             dens_factor=1.0, mass_weight=False):
+             dens_factor=1.0, mass_weight=False, rest_frame='eckart'):
     '''The value of one component in every bin.
 
     Parameters
@@ -495,6 +713,10 @@ def evaluate(num, mass, family, comp, normalization='density',
         particles in the bin).
     mass_weight : bool
         For the 4-velocity only: show the momentum m u rather than u.
+    rest_frame : 'eckart' or 'landau'
+        For the rest-frame pressure and temperature only: which rest frame.
+        The pressure is always per unit volume, the temperature P / n per
+        particle counted in the rest frame.
 
     Bins holding no particles come back as NaN, except for a density, which is
     then genuinely zero.
@@ -523,6 +745,17 @@ def evaluate(num, mass, family, comp, normalization='density',
             return _safe_div(count, n_rest)
         # thermal: rest-frame energy per particle less its rest mass
         return _safe_div(e_rest, n_rest) - _safe_div(mass[N_], count)
+
+    if family in REST_FRAME_FAMILIES:
+        P, n, U, L = rest_frame_pressure(num, mass, rest_frame)
+        bhat = rest_frame_field_direction(num, U, L) if needs_field(family, comp) else None
+        raw = pressure_component(P, comp, bhat)
+        if comp in ANISOTROPY:
+            # a dimensionless ratio, NaN where the bin is empty
+            return raw
+        if family == 'Theta':
+            return _safe_div(raw, n)
+        return np.where(count > 0, raw, 0.0) * dens_factor
 
     # The stress-energy tensor, as a sum over the bin
     if comp in ('e_rest', 'p_rest'):

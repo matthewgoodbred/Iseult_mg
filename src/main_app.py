@@ -24,8 +24,11 @@ from energy_plots import EnergyPanel
 from fft_plots import FFTPanel
 from total_energy_plots import TotEnergyPanel
 from moments import MomentsPanel
+from balance_panels import OhmsLawPanel, PressureBalancePanel
 import plot_axes
 from view_state import view_limits, view_from_limits
+import movie_writer
+import preset_views
 from functools import partial
 import subprocess, yaml
 from PIL import Image
@@ -39,12 +42,15 @@ import pathlib
 Use_MultiProcess = False # DO NOT SET TO TRUE!
 import time
 import tkinter as Tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 matplotlib.rcParams['mathtext.fontset'] = 'stix'
 matplotlib.rcParams['font.family'] = 'STIXGeneral'
 matplotlib.rcParams['image.resample'] = False
 matplotlib.rcParams['image.origin'] = 'upper'
+# Iseult never titles its axes. Giving titles a fixed height stops matplotlib
+# measuring every panel on every draw to find room for them.
+matplotlib.rcParams['axes.titley'] = 1.0
 
 import argparse
 
@@ -101,7 +107,9 @@ class SubPlotWrapper:
                              'MagPlots': BPanel,
                              'FFTPlots': FFTPanel,
                              'TotalEnergyPlot': TotEnergyPanel,
-                             'Moments': MomentsPanel
+                             'Moments': MomentsPanel,
+                             'OhmsLaw': OhmsLawPanel,
+                             'PressureBalance': PressureBalancePanel
                              }
         #####
         #
@@ -763,6 +771,154 @@ class SaveDialog(Tk.Toplevel):
     def apply(self):
         ''' Save the config file'''
         self.parent.SaveIseultState(os.path.join(self.parent.IseultDir, '.iseult_configs', str(self.e1.get()).strip().replace(' ', '_') +'.yml'), str(self.e1.get()).strip())
+class PresetManager(Tk.Toplevel):
+    '''Delete, rename and reorder the views in the Preset Views menu.
+    Every change is written to .iseult_configs right away.'''
+
+    def __init__(self, parent):
+        Tk.Toplevel.__init__(self, parent)
+        self.transient(parent)
+        self.title('Manage Preset Views')
+        self.parent = parent
+        self.config_dir = os.path.join(parent.IseultDir, '.iseult_configs')
+        self.presets = []
+
+        body = ttk.Frame(self, padding=8)
+        body.pack(fill=Tk.BOTH, expand=1)
+
+        self.listbox = Tk.Listbox(body, height=15, width=32, exportselection=False,
+                                  activestyle='none')
+        scroll = ttk.Scrollbar(body, orient=Tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scroll.set)
+        self.listbox.grid(row=0, column=0, sticky=Tk.NSEW)
+        scroll.grid(row=0, column=1, sticky=Tk.NS)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=0, column=2, sticky=Tk.N, padx=(8, 0))
+        for text, command in [('Move to Top', self.move_top),
+                              ('Move Up', partial(self.move, -1)),
+                              ('Move Down', partial(self.move, 1)),
+                              ('Move to Bottom', self.move_bottom),
+                              (None, None),
+                              ('Rename…', self.rename),
+                              ('Delete', self.delete),
+                              (None, None),
+                              ('Load', self.load),
+                              ('Close', self.destroy)]:
+            if text is None:
+                ttk.Separator(buttons).pack(fill=Tk.X, pady=6)
+            else:
+                ttk.Button(buttons, text=text, width=14, command=command).pack(pady=2)
+
+        ttk.Label(body, text='Drag or use Alt+Up/Down to reorder. Default cannot be renamed or deleted.',
+                  wraplength=320).grid(row=1, column=0, columnspan=3, sticky=Tk.W, pady=(6, 0))
+
+        self.listbox.bind('<Button-1>', self.drag_start)
+        self.listbox.bind('<B1-Motion>', self.drag_motion)
+        self.listbox.bind('<Double-Button-1>', lambda e: self.rename())
+        self.listbox.bind('<Alt-Up>', lambda e: self.move(-1) or 'break')
+        self.listbox.bind('<Alt-Down>', lambda e: self.move(1) or 'break')
+        self.listbox.bind('<Delete>', lambda e: self.delete())
+        self.listbox.bind('<F2>', lambda e: self.rename())
+        self.bind('<Escape>', lambda e: self.destroy())
+
+        self.geometry('+%d+%d' % (parent.winfo_rootx()+50, parent.winfo_rooty()+50))
+        self.refresh()
+        if self.presets:
+            self.select(0)
+        self.listbox.focus_set()
+
+    def refresh(self, select_file=None):
+        self.presets = preset_views.list_presets(self.config_dir)
+        self.listbox.delete(0, Tk.END)
+        for name, fname in self.presets:
+            self.listbox.insert(Tk.END, name)
+            if fname in preset_views.PROTECTED:
+                self.listbox.itemconfigure(Tk.END, foreground='gray40')
+        if select_file is not None:
+            for i, (_, fname) in enumerate(self.presets):
+                if fname == select_file:
+                    self.select(i)
+
+    def select(self, i):
+        self.listbox.selection_clear(0, Tk.END)
+        self.listbox.selection_set(i)
+        self.listbox.activate(i)
+        self.listbox.see(i)
+
+    def current(self):
+        sel = self.listbox.curselection()
+        return sel[0] if sel else None
+
+    def reorder(self, src, dst):
+        dst = max(0, min(dst, len(self.presets)-1))
+        if src is None or src == dst:
+            return
+        order = [fname for _, fname in self.presets]
+        order.insert(dst, order.pop(src))
+        preset_views.save_order(self.config_dir, order)
+        self.refresh(select_file=order[dst])
+
+    def move(self, step):
+        i = self.current()
+        if i is not None:
+            self.reorder(i, i+step)
+
+    def move_top(self):
+        self.reorder(self.current(), 0)
+
+    def move_bottom(self):
+        self.reorder(self.current(), len(self.presets)-1)
+
+    def drag_start(self, event):
+        self._drag_index = self.listbox.nearest(event.y)
+
+    def drag_motion(self, event):
+        i = self.listbox.nearest(event.y)
+        if i != self._drag_index:
+            self.reorder(self._drag_index, i)
+            self._drag_index = i
+
+    def rename(self):
+        i = self.current()
+        if i is None:
+            return
+        name, fname = self.presets[i]
+        new_name = simpledialog.askstring('Rename Preset', 'New name:', initialvalue=name, parent=self)
+        if new_name is None or new_name.strip() == name:
+            return
+        try:
+            new_file = preset_views.rename_preset(self.config_dir, fname, new_name)
+        except (ValueError, OSError) as e:
+            messagebox.showwarning('Cannot rename', str(e), parent=self)
+            return
+        self.refresh(select_file=new_file)
+
+    def delete(self):
+        i = self.current()
+        if i is None:
+            return
+        name, fname = self.presets[i]
+        if not messagebox.askyesno('Delete Preset', f'Delete the preset view "{name}"?\nThis removes {fname}.',
+                                   parent=self):
+            return
+        try:
+            preset_views.delete_preset(self.config_dir, fname)
+        except (ValueError, OSError) as e:
+            messagebox.showwarning('Cannot delete', str(e), parent=self)
+            return
+        self.refresh()
+        if self.presets:
+            self.select(min(i, len(self.presets)-1))
+
+    def load(self):
+        i = self.current()
+        if i is not None:
+            self.parent.LoadConfig(os.path.join(self.config_dir, self.presets[i][1]))
+
+
 class MaxNDialog(Tk.Toplevel):
 
     def __init__(self, parent, title = None):
@@ -932,6 +1088,14 @@ class MovieDialog(Tk.Toplevel):
         self.e6.insert(0, directory)
         self.e6.grid(row=5, column=1, sticky=Tk.E + Tk.W)
 
+        # The resolution of the movie. The figure keeps its size in inches, so
+        # a higher dpi gives more pixels (and larger text in pixels), not a
+        # different layout. Defaults to the dpi of the figure on screen.
+        ttk.Label(master, text="DPI:").grid(row=6)
+        self.e7 = ttk.Entry(master, width=17)
+        self.e7.insert(0, f'{self.parent.f.dpi:g}')
+        self.e7.grid(row=6, column=1, sticky=Tk.E + Tk.W)
+
 
     def buttonbox(self):
         # add standard button box. override if you don't want the
@@ -994,6 +1158,10 @@ class MovieDialog(Tk.Toplevel):
         except ValueError:
             self.FPS = ''
         self.outdir = str(self.e6.get().strip())
+        try:
+            self.DPI = float(self.e7.get())
+        except ValueError:
+            self.DPI = ''
 
 
         if self.Name != '':
@@ -1072,6 +1240,11 @@ class MovieDialog(Tk.Toplevel):
                 "Bad input",
                 "FPS must contain an int >0, please try again"
             )
+        elif self.DPI == '' or not self.DPI > 0:
+            messagebox.showwarning(
+                "Bad input",
+                "DPI must be a number >0, please try again"
+            )
         elif bad == False:
             return 1 # override
 
@@ -1082,7 +1255,8 @@ class MovieDialog(Tk.Toplevel):
                                 stop = self.EndFrame,
                                 step = self.Step,
                                 FPS = self.FPS,
-                                outdir = self.outdir)
+                                outdir = self.outdir,
+                                dpi = self.DPI)
 
 
 class SettingsFrame(Tk.Toplevel):
@@ -1868,6 +2042,7 @@ class MainApp(Tk.Tk):
         self.wm_title(name)
         self.settings_window = None
         self.measure_window = None
+        self.preset_window = None
 
 
         self.cmd_args = cmd_args
@@ -2071,23 +2246,14 @@ class MainApp(Tk.Tk):
             self.after(1, self.quit())
         self.update()
     def ViewUpdate(self):
-        tmpdir = list(os.listdir(os.path.join(self.IseultDir, '.iseult_configs')))
-        tmpdir.sort()
-        for cfile in tmpdir:
-            if cfile.split('.')[-1]=='yml':
-                with open(os.path.join(os.path.join(self.IseultDir, '.iseult_configs'), cfile), 'r') as f:
-                    cfgDict=yaml.safe_load(f)
-                try:
-                    if 'general' in cfgDict.keys():
-                        if 'ConfigName'  in cfgDict['general'].keys():
-                            tmpstr = cfgDict['general']['ConfigName']
-                            try:
-                                self.presetMenu.delete(tmpstr)
-                            except:
-                                pass
-                            self.presetMenu.add_command(label = tmpstr, command = partial(self.LoadConfig, str(os.path.join(self.IseultDir,'.iseult_configs', cfile))))
-                except:
-                    pass
+        # Rebuilt every time the menu opens so it follows renames, deletions
+        # and reordering done in the PresetManager.
+        config_dir = os.path.join(self.IseultDir, '.iseult_configs')
+        self.presetMenu.delete(0, Tk.END)
+        for name, cfile in preset_views.list_presets(config_dir):
+            self.presetMenu.add_command(label = name, command = partial(self.LoadConfig, os.path.join(config_dir, cfile)))
+        self.presetMenu.add_separator()
+        self.presetMenu.add_command(label = 'Manage Presets…', command = self.OpenPresetManager)
     def StrideChanged(self):
         # first we have to remove the calculated energy time steps
         self.TotalEnergyTimeSteps = []
@@ -2459,6 +2625,7 @@ class MainApp(Tk.Tk):
         self.ReDrawCanvas()
         self.f.canvas.mpl_connect('button_press_event', self.onclick)
         self.f.canvas.mpl_connect('button_release_event', self.on_release)
+        self.f.canvas.mpl_connect('draw_event', self.on_draw)
 
     def LoadConfig(self, config_file):
         # First get rid of any & all pop up windows:
@@ -2573,7 +2740,7 @@ class MainApp(Tk.Tk):
 
         # FIND THE SLICE
         filepath = self.PathDict['Flds'][self.TimeStep.value-1]
-        bx_shape = data_loading.load_dataset(filepath, 'bx').shape
+        bx_shape = data_loading.dataset_shape(filepath, 'bx')
         self.MaxZInd, self.MaxYInd, self.MaxXInd  = np.array(bx_shape) - 1
 
         self.ySlice = int(np.around(self.MainParamDict['ySlice']*self.MaxYInd))
@@ -2917,7 +3084,7 @@ class MainApp(Tk.Tk):
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
                 subplot = self.SubPlotList[i][j]
-                if subplot.chartType == 'Moments' or subplot.chartType == 'TotalEnergyPlot':
+                if subplot.chartType in ('Moments', 'TotalEnergyPlot', 'OhmsLaw', 'PressureBalance'):
                     try:
                         if subplot.graph.legend._get_loc() != 1:
                             subplot.SetPlotParam('legend_loc', ' '.join(str(x) for x in subplot.graph.legend._get_loc()), update_plot = False)
@@ -2941,7 +3108,7 @@ class MainApp(Tk.Tk):
                 if subplot.draw_failed:
                     # It has no legend to place, only an error message.
                     continue
-                if subplot.chartType == 'Moments' or subplot.chartType == 'TotalEnergyPlot':
+                if subplot.chartType in ('Moments', 'TotalEnergyPlot', 'OhmsLaw', 'PressureBalance'):
                     if subplot.GetPlotParam('legend_loc') != 'N/A':
                         tmp_tup = float(subplot.GetPlotParam('legend_loc').split()[0]),float(subplot.GetPlotParam('legend_loc').split()[1])
                         try:
@@ -3530,8 +3697,10 @@ class MainApp(Tk.Tk):
             self.MainParamDict['Recording'] = False
             self.playbackbar.RecVar.set(False)
 
-    def MakeAMovie(self, fname, start, stop, step, FPS, outdir):
-        '''Record a movie'''
+    def MakeAMovie(self, fname, start, stop, step, FPS, outdir = os.curdir, dpi = None):
+        '''Record a movie of frames start to stop (inclusive), every step-th
+        one, at FPS frames per second. dpi sets the resolution; None uses the
+        dpi of the figure on screen.'''
         # First find the last frame is stop is -1:
 
         if stop == -1:
@@ -3548,40 +3717,21 @@ class MainApp(Tk.Tk):
             for k in frame_arr:
                 self.TimeStep.set(k)
 
-        cmdstring = ['ffmpeg',
-            '-framerate', str(int(FPS)), # Set framerate to the the user selected option
-#            '-pattern_type', 'glob',
-            '-i', '-',
-            '-c:v',
-            'prores',
-            '-pix_fmt',
-            'yuv444p10le',
-            os.path.join(os.path.join(outdir),fname)]
-        print("cmdstring=",cmdstring)
-        pipe = subprocess.Popen(cmdstring, stdin=subprocess.PIPE)
-
-        for i in frame_arr:
-            self.TimeStep.set(i)
-            s, (width, height) = self.canvas.print_to_buffer()
-            im = Image.frombytes('RGBA', (width, height), s)
-            # The ffmpeg command we want to call.
-            ## ffmpeg -framerate [FPS] -i [NAME_***].png -c:v prores -pix_fmt yuv444p10le [OUTPUTNAME].mov
-            #, '&']#, # output name,
-                        #'<dev/null', '>dev/null', '2>/var/log/ffmpeg.log', '&'] # run in background
-            width1=width//2 *2 #make it even
-            height1=height//2 *2 #make it even
-            im1=im.crop((0,0,width1,height1))# box=width1,height1]
-            im1.save(pipe.stdin, 'PNG')
-            print(f"saving image {i} to pipe")
-        pipe.stdin.close()
-        pipe.wait()
-
-        # Make sure all went well
-        if pipe.returncode != 0:
-            raise subprocess.CalledProcessError(pipe.returncode, cmdstring)
+        outpath = os.path.join(outdir, fname)
+        print(f'Writing {len(frame_arr)} frames to {outpath}')
+        with movie_writer.MovieWriter(outpath, FPS) as movie:
+            for i in frame_arr:
+                self.TimeStep.set(i)
+                movie.write(movie_writer.render_frame(self.f, dpi))
+                print(f"saved frame {i}")
 
     def OpenSaveDialog(self):
         SaveDialog(self)
+    def OpenPresetManager(self):
+        if self.preset_window is not None and self.preset_window.winfo_exists():
+            self.preset_window.lift()
+        else:
+            self.preset_window = PresetManager(self)
     def OpenMovieDialog(self):
         MovieDialog(self)
 
@@ -3686,12 +3836,11 @@ class MainApp(Tk.Tk):
             spec = graph.axes.get_subplotspec()
             if spec is not None:
                 graph.axes.set_position(spec.get_position(self.f))
-        # Laying the figure out is what makes matplotlib work out the
-        # aspect-locked boxes; it does not need to be rasterized to do that.
-        try:
-            self.f.draw_without_rendering()
-        except AttributeError:
-            self.canvas.draw()
+        # Work out the aspect-locked boxes the way drawing the figure would,
+        # without paying for laying out every tick and label to do it.
+        for graph in all_graphs:
+            if graph.axes.get_aspect() != 'auto':
+                graph.axes.apply_aspect()
 
         for (side, _axis), members in groups.items():
             free = [g for g in members if g.axes.get_aspect() == 'auto']
@@ -3755,6 +3904,27 @@ class MainApp(Tk.Tk):
                                 return True
                 m += 1
         return False
+
+    def on_draw(self, event):
+        '''Keep the shared axes lined up after an interactive zoom or pan.
+
+        Zooming an aspect-locked 2D panel changes the size of its box as soon
+        as it is drawn, but the lineouts sharing its limits would only be
+        resized to match at the next refresh. So after every draw the boxes
+        are aligned again, and the canvas redrawn if that moved any of them.'''
+        if getattr(self, '_aligning', False):
+            return
+        self._aligning = True
+        try:
+            before = [ax.get_position().bounds for ax in self.f.axes]
+            self.AlignSharedAxes()
+            after = [ax.get_position().bounds for ax in self.f.axes]
+            if not np.allclose(before, after, atol=1e-6):
+                self.canvas.draw_idle()
+        except Exception:
+            pass
+        finally:
+            self._aligning = False
 
     def on_release(self, event):
         # Defer limit check slightly to let toolbar updates complete
@@ -3871,18 +4041,15 @@ class MainApp(Tk.Tk):
             self.btheta = np.nan
 
         filepath = self.PathDict['Flds'][0]
-        by = data_loading.load_dataset(filepath, 'by')
-        nxf0 = by.shape[1]
+        nxf0 = data_loading.dataset_shape(filepath, 'by')[1]
         if np.isnan(self.btheta):
             self.b0 = 1.0
             self.e0 = 1.0
         else:
             # Normalize by b0
-            bx = data_loading.load_dataset(filepath, 'bx')
-            print(np.shape(bx))
             b_slice = (slice(0,1),slice(-1,None),slice(-10,-9))
-            self.bx0 = bx[0,-1,-10]
-            self.by0 = by[0,-1,-10]
+            self.bx0 = data_loading.load_dataset(filepath, 'bx', b_slice)
+            self.by0 = data_loading.load_dataset(filepath, 'by', b_slice)
             self.bz0 = data_loading.load_dataset(filepath, 'bz', b_slice)
             self.b0 = np.sqrt(self.bx0**2+self.by0**2+self.bz0**2)
             e_slice = (slice(0,1), slice(-1,None), slice(-2,-1))

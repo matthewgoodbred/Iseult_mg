@@ -34,8 +34,11 @@ class  MomentsPanel:
 
     plot_param_dict = {'twoD': 0,
                        'm_type': 0, # Which quantity; an index into stress_energy.FAMILIES:
-                                    # 0 = 3-velocity, 1 = 4-velocity, 2 = energy, 3 = stress-energy tensor
+                                    # 0 = 3-velocity, 1 = 4-velocity, 2 = energy, 3 = stress-energy tensor,
+                                    # 4 = rest-frame pressure tensor, 5 = rest-frame temperature tensor
                        'basis': 0, # 0 = lab x, y, z; 1 = parallel/perpendicular to the local B
+                       'rest_frame': 0, # Rest-frame pressure & temperature only, an index into
+                                        # stress_energy.FRAMES: 0 = Eckart, 1 = Landau
                        'components': '', # Comma separated component names, see stress_energy.components.
                                          # Empty means use the old show_x/y/z flags; 'none' means none.
                        'normalization': 0, # Stress-energy only: 0 = per unit volume, 1 = per particle
@@ -150,6 +153,15 @@ class  MomentsPanel:
         keys = ('show_ions', 'show_electrons', 'show_total')
         return [i for i, key in enumerate(keys) if self.GetPlotParam(key)]
 
+    def rest_frame(self):
+        '''The rest frame of the rest-frame pressure and temperature: 'eckart' or 'landau'.'''
+        return se.FRAMES[1] if self.GetPlotParam('rest_frame') else se.FRAMES[0]
+
+    def per_volume(self):
+        '''Whether the quantity shown is a density, which needs the bin volume and ppc0.'''
+        family = self.family()
+        return family == 'P' or (family == 'T' and self.GetPlotParam('normalization') == 0)
+
     def needs_field(self):
         family = self.family()
         return any(se.needs_field(family, c) for c in self.selected_components())
@@ -230,7 +242,7 @@ class  MomentsPanel:
         '''A helper function that will insure that each hdf5 file will only be
         opened once per time step'''
         self.arrs_needed = ['c_omp', 'istep', 'me', 'mi']
-        if self.family() == 'T' and self.GetPlotParam('normalization') == 0:
+        if self.per_volume():
             self.arrs_needed += ['stride', 'ppc0']
 
         spec = self.binning_spec()
@@ -255,7 +267,8 @@ class  MomentsPanel:
             needed_axes.add(spec['third'])
         if spec['field_aligned']:
             needed_axes |= {'x', 'y', 'z'}
-            self.arrs_needed += ['bx', 'by', 'bz']
+            # E only to find the field in the plasma rest frame
+            self.arrs_needed += ['bx', 'by', 'bz', 'ex', 'ey', 'ez']
         if spec['h_axis'] != 'x':
             needed_axes.add('x') # the fallback for data without that coordinate
 
@@ -347,7 +360,7 @@ class  MomentsPanel:
     def density_factor(self, entry):
         '''What turns a per-bin sum into a density, in units of ppc0 per cell,
         the same n_0 the density panel normalizes to. Also whether ppc0 was known.'''
-        if not (self.family() == 'T' and self.GetPlotParam('normalization') == 0):
+        if not self.per_volume():
             return 1.0, True
         try:
             stride = float(np.squeeze(self.FigWrap.LoadKey('stride')))
@@ -390,10 +403,19 @@ class  MomentsPanel:
         if h_range[1] <= h_range[0]:
             h_range = (h_range[0], h_range[0] + 1.0)
 
-        bfield = None
+        bfield = efield = None
         if spec['field_aligned']:
             bfield = tuple(np.ascontiguousarray(self.FigWrap.LoadKey(k), dtype = np.float32)
                            for k in ('bx', 'by', 'bz'))
+            try:
+                efield = tuple(np.ascontiguousarray(self.FigWrap.LoadKey(k), dtype = np.float32)
+                               for k in ('ex', 'ey', 'ez'))
+            except KeyError:
+                efield = None
+            if efield is not None and any(e.shape != bfield[0].shape for e in efield):
+                efield = None
+            if efield is None:
+                print('Moments: no electric field to go with B; the rest-frame field is taken to be the lab one.')
 
         sums = []
         n_particles = 0
@@ -449,7 +471,7 @@ class  MomentsPanel:
                 v_range = None if v_range is None else (v_range[0] * self.c_omp, v_range[1] * self.c_omp),
                 nv = spec['nv'], weights = weights, mask = mask,
                 bfield = bfield, positions = positions, istep = self.istep,
-                fallback_position = fallback))
+                fallback_position = fallback, efield = efield))
 
         h_edges = np.linspace(h_range[0], h_range[1], spec['nh'] + 1)
         v_edges = np.linspace(v_range[0], v_range[1], spec['nv'] + 1) if spec['two_d'] else None
@@ -481,7 +503,8 @@ class  MomentsPanel:
         return se.evaluate(num, mass, self.family(), comp,
                            normalization = 'particle' if self.GetPlotParam('normalization') else 'density',
                            dens_factor = self.dens_factor,
-                           mass_weight = bool(self.GetPlotParam('mass_weight')))
+                           mass_weight = bool(self.GetPlotParam('mass_weight')),
+                           rest_frame = self.rest_frame())
 
     def series(self):
         '''(species, component) pairs for every line of a profile.'''
@@ -499,8 +522,10 @@ class  MomentsPanel:
         if family == 'energy':
             comps = self.selected_components()
             return '' if comps == ['gamma_bulk'] else r'%s c^2' % m
-        if family == 'T':
-            if self.GetPlotParam('normalization'):
+        if family == 'Theta':
+            return r'%s c^2' % m
+        if family in ('T', 'P'):
+            if family == 'T' and self.GetPlotParam('normalization'):
                 return r'%s c^2\ /\ {\rm particle}' % m
             if self.has_ppc0:
                 return r'n_0 %s c^2' % m
@@ -516,9 +541,17 @@ class  MomentsPanel:
             body = {'beta': r'\langle\beta\rangle',
                     'u': r'\langle p^\mu\rangle' if self.GetPlotParam('mass_weight') else r'\langle u^\mu\rangle',
                     'energy': r'E',
-                    'T': r'T^{\mu\nu}'}[family]
+                    'T': r'T^{\mu\nu}',
+                    'P': r'P_{ij}',
+                    'Theta': r'\Theta_{ij}'}[family]
         units = self.units_tex()
-        return '$' + body + (r'\ [' + units + ']' if units else '') + '$'
+        return '$' + body + (r'\ [' + units + ']' if units else '') + '$' + self.frame_suffix()
+
+    def frame_suffix(self):
+        '''Which rest frame a rest-frame quantity is in, for a label.'''
+        if self.family() not in se.REST_FRAME_FAMILIES:
+            return ''
+        return '  (' + self.rest_frame().capitalize() + ')'
 
     ####
     #
@@ -669,7 +702,7 @@ class  MomentsPanel:
         units = self.units_tex()
         if units:
             label += '  $[' + units + ']$'
-        return label
+        return label + self.frame_suffix()
 
     def norm(self, vmin=None, vmax=None):
         if self.GetPlotParam('cnorm_type') == 'Log':
@@ -903,13 +936,13 @@ class MomentsSettings(Tk.Toplevel):
         self.FamilyVar = Tk.IntVar(self)
         self.FamilyVar.set(self.parent.GetPlotParam('m_type'))
         # Laid out in the order that reads naturally, keeping the legacy m_type values
-        for pos, family in enumerate(('beta', 'u', 'T', 'energy')):
+        for pos, family in enumerate(('beta', 'u', 'T', 'energy', 'P', 'Theta')):
             ttk.Radiobutton(box, text = se.FAMILY_NAMES[family], variable = self.FamilyVar,
                             value = se.FAMILIES.index(family),
                             command = self.FamilyChanged).grid(row = pos // 2, column = pos % 2, sticky = Tk.W, padx = (0, 12))
 
         basis_row = ttk.Frame(box)
-        basis_row.grid(row = 2, column = 0, columnspan = 2, sticky = Tk.W, pady = (4, 0))
+        basis_row.grid(row = 3, column = 0, columnspan = 2, sticky = Tk.W, pady = (4, 0))
         ttk.Label(basis_row, text = 'Basis:').pack(side = Tk.LEFT)
         self.BasisVar = Tk.IntVar(self)
         self.BasisVar.set(self.parent.GetPlotParam('basis'))
@@ -919,6 +952,16 @@ class MomentsSettings(Tk.Toplevel):
                                  value = i, command = self.BasisChanged)
             rb.pack(side = Tk.LEFT, padx = (4, 4))
             rb.state(state)
+
+        if self.parent.family() in se.REST_FRAME_FAMILIES:
+            frame_row = ttk.Frame(box)
+            frame_row.grid(row = 4, column = 0, columnspan = 2, sticky = Tk.W, pady = (2, 0))
+            ttk.Label(frame_row, text = 'Rest frame:').pack(side = Tk.LEFT)
+            self.FrameVar = Tk.IntVar(self)
+            self.FrameVar.set(self.parent.GetPlotParam('rest_frame'))
+            for i, frame in enumerate(se.FRAMES):
+                ttk.Radiobutton(frame_row, text = se.FRAME_NAMES[frame], variable = self.FrameVar,
+                                value = i, command = self.FrameChanged).pack(side = Tk.LEFT, padx = (4, 4))
 
     # Which components
 
@@ -942,16 +985,19 @@ class MomentsSettings(Tk.Toplevel):
             return ttk.Checkbutton(parent_frame, text = text, variable = var,
                                    command = self.ComponentsChanged)
 
-        if family == 'T':
+        if family in ('T',) + se.REST_FRAME_FAMILIES:
+            rest = family in se.REST_FRAME_FAMILIES
             grid = ttk.Frame(box)
             grid.grid(row = 0, column = 0, sticky = Tk.W)
-            idx = ('0',) + se.SPATIAL[basis]
+            idx = se.SPATIAL[basis] if rest else ('0',) + se.SPATIAL[basis]
             names = {'0': 't', 'x': 'x', 'y': 'y', 'z': 'z', 'par': '∥', 'perp': '⊥'}
-            ttk.Label(grid, text = 'Tᵘᵛ', foreground = 'gray35').grid(row = 0, column = 0, padx = 4)
+            corner = {'T': 'T^μν', 'P': "P'^ij", 'Theta': "Θ'^ij"}[family]
+            ttk.Label(grid, text = corner, foreground = 'gray35').grid(row = 0, column = 0, padx = 4)
+            col_index, row_index = ('j=', 'i=') if rest else ('ν=', 'μ=')
             for j, b in enumerate(idx):
-                ttk.Label(grid, text = 'ν=' + names[b]).grid(row = 0, column = j + 1)
+                ttk.Label(grid, text = col_index + names[b]).grid(row = 0, column = j + 1)
             for i, a in enumerate(idx):
-                ttk.Label(grid, text = 'μ=' + names[a]).grid(row = i + 1, column = 0, sticky = Tk.E, padx = 4)
+                ttk.Label(grid, text = row_index + names[a]).grid(row = i + 1, column = 0, sticky = Tk.E, padx = 4)
                 for j, b in enumerate(idx):
                     if j < i:
                         # T is symmetric, so the lower triangle repeats the upper one
@@ -959,14 +1005,24 @@ class MomentsSettings(Tk.Toplevel):
                         continue
                     comp = se.tensor_key(a, b, basis)
                     widget(grid, comp).grid(row = i + 1, column = j + 1, sticky = Tk.W, padx = 2)
-            if basis == 'fa':
+            if basis == 'fa' and rest:
+                ttk.Label(box, text = '∥ is along the bin\'s mean B as seen in the rest frame;  '
+                                      '⊥⊥ is per perpendicular direction;  ∥⊥ is a magnitude',
+                          foreground = 'gray35').grid(row = 1, column = 0, sticky = Tk.W)
+            elif basis == 'fa':
                 ttk.Label(box, text = '∥∥ = P∥,  ⊥⊥ = P⊥ (per perpendicular direction);  '
                                       '0⊥ and ∥⊥ are magnitudes', foreground = 'gray35').grid(row = 1, column = 0, sticky = Tk.W)
             inv = ttk.Frame(box)
             inv.grid(row = 2, column = 0, sticky = Tk.W, pady = (4, 0))
             ttk.Label(inv, text = 'Scalars:').pack(side = Tk.LEFT)
-            for comp in se.T_INVARIANTS:
+            for comp in (se.P_INVARIANTS if rest else se.T_INVARIANTS):
                 widget(inv, comp).pack(side = Tk.LEFT, padx = 2)
+            if rest and basis == 'fa':
+                aniso = ttk.Frame(box)
+                aniso.grid(row = 3, column = 0, sticky = Tk.W, pady = (4, 0))
+                ttk.Label(aniso, text = 'Anisotropy:').pack(side = Tk.LEFT)
+                for comp in se.ANISOTROPY:
+                    widget(aniso, comp).pack(side = Tk.LEFT, padx = 2)
         else:
             line = ttk.Frame(box)
             line.grid(row = 0, column = 0, sticky = Tk.W)
@@ -978,9 +1034,10 @@ class MomentsSettings(Tk.Toplevel):
 
         if not two_d:
             quick = ttk.Frame(box)
-            quick.grid(row = 3, column = 0, sticky = Tk.W, pady = (4, 0))
-            if family == 'T':
+            quick.grid(row = 4, column = 0, sticky = Tk.W, pady = (4, 0))
+            if family in ('T',) + se.REST_FRAME_FAMILIES:
                 ttk.Button(quick, text = 'Diagonal', command = self.SelectDiagonal).pack(side = Tk.LEFT)
+            if family == 'T':
                 ttk.Button(quick, text = 'Energy & momentum', command = self.SelectEnergyFlux).pack(side = Tk.LEFT, padx = 4)
             else:
                 ttk.Button(quick, text = 'All', command = self.SelectAll).pack(side = Tk.LEFT)
@@ -1008,7 +1065,9 @@ class MomentsSettings(Tk.Toplevel):
         self.select([])
 
     def SelectDiagonal(self):
-        idx = ('0',) + se.SPATIAL[self.parent.basis()]
+        idx = se.SPATIAL[self.parent.basis()]
+        if self.parent.family() == 'T':
+            idx = ('0',) + idx
         self.select([se.tensor_key(a, a, self.parent.basis()) for a in idx])
 
     def SelectEnergyFlux(self):
@@ -1087,7 +1146,7 @@ class MomentsSettings(Tk.Toplevel):
         if family == 'T':
             norm = ttk.Frame(box)
             norm.grid(row = 3, column = 0, sticky = Tk.W, pady = (2, 0))
-            ttk.Label(norm, text = 'Tᵘᵛ per:').pack(side = Tk.LEFT)
+            ttk.Label(norm, text = 'T^μν per:').pack(side = Tk.LEFT)
             self.NormVar = Tk.IntVar(self)
             self.NormVar.set(self.parent.GetPlotParam('normalization'))
             for i, name in enumerate(('unit volume  [n0 m c², n0 = ppc0 per cell]', 'particle  [m c²]')):
@@ -1187,6 +1246,10 @@ class MomentsSettings(Tk.Toplevel):
         self.parent.SetPlotParam('components', ','.join(se.default_components(family, basis)), update_plot = False)
         self.build_body()
         self.parent.SetPlotParam('m_type', m_type)
+
+    def FrameChanged(self):
+        if self.FrameVar.get() != self.parent.GetPlotParam('rest_frame'):
+            self.parent.SetPlotParam('rest_frame', self.FrameVar.get())
 
     def BasisChanged(self):
         basis_index = self.BasisVar.get()

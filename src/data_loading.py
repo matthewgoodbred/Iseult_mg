@@ -257,7 +257,10 @@ def __load_tristan_v2_density_by_charge(field_file_path: pathlib.Path, field_fil
                 continue
             mass = param_file['particles:m' + str(species)][0]
             contribution = field_file[dataset][dataset_slice] / mass
-            total = contribution if total is None else total + contribution
+            if total is None:
+                total = contribution
+            else:
+                total += contribution
 
     if total is None:
         warnings.warn(f'No species with {sign} charge found in {field_file_path}. Returning zero valued data.')
@@ -473,3 +476,43 @@ def load_dataset(file_path: str | pathlib.Path, dataset_name: str, dataset_slice
 # =============================================================================
 load_data = load_dataset
 
+# =============================================================================
+def dataset_shape(file_path: str | pathlib.Path, dataset_name: str) -> tuple:
+    """The shape of a field dataset, read from the file's metadata without loading the data.
+
+    Parameters
+    ----------
+    file_path : str | pathlib.Path
+        The path to the file
+    dataset_name : str
+        The name of the dataset. Must be one whose name is the same in Tristan v1 and v2, e.g. 'bx'.
+
+    Returns
+    -------
+    tuple
+        The shape of the dataset
+    """
+    file_path = __verify_file_path(pathlib.Path(file_path))
+    with h5py.File(file_path, 'r') as file:
+        return file[dataset_name].shape
+# =============================================================================
+
+
+# =============================================================================
+def tristan_version(file_path: str | pathlib.Path) -> int:
+    """Which version of Tristan, 1 or 2, wrote a data file.
+
+    Parameters
+    ----------
+    file_path : str | pathlib.Path
+        The path to any output file: parameters, fields, particles or spectra.
+
+    Returns
+    -------
+    int
+        1 or 2
+    """
+    file_path = __verify_file_path(pathlib.Path(file_path))
+    with h5py.File(file_path, 'r') as file:
+        return __detect_tristan_data_version(file)
+# =============================================================================

@@ -186,6 +186,9 @@ def on_limits_changed(panel):
                 subplot = main_app.SubPlotList[row][col]
                 if subplot is not None and hasattr(subplot, 'graph') and subplot.graph is not None:
                     g = subplot.graph
+                    if subplot.chartType not in ('FieldsPlot', 'DensityPlot') or subplot.draw_failed:
+                        # only these panels have vectors to draw
+                        continue
                     if hasattr(g, 'GetPlotParam') and g.GetPlotParam("show_vectors"):
                         if hasattr(g, 'c_omp') and hasattr(g, 'istep'):
                             refresh_vectors(g)

@@ -9,7 +9,22 @@ from new_cnorms import PowerNormWithNeg, PowerNormFunc
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
+from numba import njit, prange
 import plot_axes
+
+
+@njit(parallel=True, cache=True)
+def _theta_b(bx, by, bz):
+    '''The angle between B and the x axis in degrees, cell by cell.
+
+    The same as np.rad2deg(np.arctan2(np.sqrt(by**2+bz**2), np.abs(bx))), but
+    multi-threaded and without the temporaries, which matters for 3D runs.'''
+    fx, fy, fz = bx.ravel(), by.ravel(), bz.ravel()
+    out = np.empty_like(fx)
+    for i in prange(fx.size):
+        out[i] = np.rad2deg(np.arctan2(np.sqrt(fy[i]*fy[i] + fz[i]*fz[i]), abs(fx[i])))
+    return out.reshape(bx.shape)
+
 
 class BPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -109,7 +124,7 @@ class BPanel:
                 bx = self.FigWrap.LoadKey('bx')
                 by = self.FigWrap.LoadKey('by')
                 bz = self.FigWrap.LoadKey('bz')
-                self.f = np.rad2deg(np.arctan2(np.sqrt(by**2+bz**2),np.abs(bx)))
+                self.f = _theta_b(np.ascontiguousarray(bx), np.ascontiguousarray(by), np.ascontiguousarray(bz))
                 #self.f = np.rad2deg(np.arctan2(by,bx))
                 self.parent.DataDict['thetaB'] = self.f
         #removing this field
@@ -147,14 +162,18 @@ class BPanel:
                 self.ylabel = r'$|\delta B|$'
                 self.ann_label = r'$|\delta B|$'
 
-            bx = self.FigWrap.LoadKey('bx')
-            by = self.FigWrap.LoadKey('by')
-            bz = self.FigWrap.LoadKey('bz')
+            if 'deltaB' in self.parent.DataDict.keys():
+                self.f = self.parent.DataDict['deltaB']
+            else:
+                bx = self.FigWrap.LoadKey('bx')
+                by = self.FigWrap.LoadKey('by')
+                bz = self.FigWrap.LoadKey('bz')
 
-            deltaB = (bx-self.parent.bx0)**2
-            deltaB += (by-self.parent.by0)**2
-            deltaB += (bz-self.parent.bz0)**2
-            self.f = np.sqrt(deltaB)/self.parent.b0
+                deltaB = (bx-self.parent.bx0)**2
+                deltaB += (by-self.parent.by0)**2
+                deltaB += (bz-self.parent.bz0)**2
+                self.f = np.sqrt(deltaB)/self.parent.b0
+                self.parent.DataDict['deltaB'] = self.f
 
 
         if self.GetPlotParam('mag_plot_type') == 2: # Set f to deltaB_perp/B0

@@ -5,9 +5,8 @@ streamline and vector potential (Az) contour overlays for Iseult.
 
 import tkinter as Tk
 import numpy as np
-import matplotlib
-import matplotlib.patches
 
+import fast_streamplot
 import plot_axes
 import vector_arrows
 
@@ -311,7 +310,7 @@ def az_contours_callback(settings, update_plot=True):
 # ------------------------------------------------------------------------------
 
 def draw_streamlines(panel):
-    """Draw streamlines of the selected vector field using matplotlib.streamplot."""
+    """Draw streamlines of the selected vector field, as matplotlib.streamplot would."""
     panel.FigWrap.streamlines = None
     stride = max(1, int(panel.GetPlotParam("streamlines_stride")))
 
@@ -336,13 +335,10 @@ def draw_streamlines(panel):
     ymin = getattr(panel, "ymin", 0.0)
     ymax = getattr(panel, "ymax", float(bx.shape[0]))
 
-    coords_x = np.linspace(xmin, xmax, bx.shape[1])
-    coords_y = np.linspace(ymin, ymax, bx.shape[0])
-    coords_x, coords_y = np.meshgrid(coords_x, coords_y)
-
-    panel.FigWrap.streamlines = panel.FigWrap.graph.axes.streamplot(
-        coords_x,
-        coords_y,
+    panel.FigWrap.streamlines = fast_streamplot.streamplot(
+        panel.FigWrap.graph.axes,
+        np.linspace(xmin, xmax, bx.shape[1]),
+        np.linspace(ymin, ymax, bx.shape[0]),
         bx,
         by,
         density=panel.GetPlotParam("streamlines_density"),
@@ -358,17 +354,8 @@ def refresh_streamlines(panel):
 
 def remove_streamlines(panel):
     """Remove streamlines."""
-    if hasattr(panel.FigWrap, "streamlines") and panel.FigWrap.streamlines is not None:
-        try:
-            panel.FigWrap.streamlines.lines.remove()
-        except Exception:
-            pass
-        for artist in panel.FigWrap.graph.axes.get_children():
-            if isinstance(artist, matplotlib.patches.FancyArrowPatch):
-                try:
-                    artist.remove()
-                except Exception:
-                    pass
+    if getattr(panel.FigWrap, "streamlines", None) is not None:
+        panel.FigWrap.streamlines.remove()
         panel.FigWrap.streamlines = None
 
 

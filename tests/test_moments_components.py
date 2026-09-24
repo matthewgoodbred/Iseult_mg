@@ -43,6 +43,8 @@ def make_panel(**params):
     ({'m_type': 3, 'components': 'xx,00,bogus'}, 'T', ['00', 'xx']),
     ({'m_type': 3, 'basis': 1, 'components': 'xx'}, 'T', ['00']),  # not in this basis
     ({'m_type': 0, 'components': 'none'}, 'beta', []),
+    ({'m_type': 4, 'components': 'yy,xx,00'}, 'P', ['xx', 'yy']),  # no time components
+    ({'m_type': 5, 'basis': 1, 'components': 'perpperp,scalar'}, 'Theta', ['perpperp', 'scalar']),
 ])
 def test_selected_components(params, family, comps):
     panel = make_panel(**params)
@@ -62,7 +64,8 @@ def test_changing_the_component_does_not_change_what_is_binned():
     panel = make_panel(m_type=3, components='00')
     key = panel.binning_spec()['key_lab']
     for params in ({'components': 'xy'}, {'m_type': 0, 'components': 'x'},
-                   {'normalization': 1}, {'show_ions': False}, {'mass_weight': True}):
+                   {'normalization': 1}, {'show_ions': False}, {'mass_weight': True},
+                   {'m_type': 4, 'components': 'xy'}, {'m_type': 5, 'rest_frame': 1}):
         panel.FigWrap.params.update(params)
         assert panel.binning_spec()['key_lab'] == key
 
@@ -75,6 +78,14 @@ def test_field_aligned_components_ask_for_the_field_pass():
     lab = make_panel(m_type=3, components='00').binning_spec()
     assert MomentsPanel.cached({spec['key_fa']: 'fa sums'}, lab) == 'fa sums'
     assert MomentsPanel.cached({lab['key_lab']: 'lab sums'}, spec) is None
+
+
+def test_rest_frame_components_in_the_field_aligned_basis_need_the_field_pass():
+    assert make_panel(m_type=4, basis=1, components='parpar').binning_spec()['field_aligned']
+    assert not make_panel(m_type=4, basis=1, components='scalar').binning_spec()['field_aligned']
+    assert make_panel(m_type=5, rest_frame=1).rest_frame() == 'landau'
+    assert make_panel(m_type=4).per_volume()
+    assert not make_panel(m_type=5).per_volume()
 
 
 def test_binning_changes_change_the_key():
