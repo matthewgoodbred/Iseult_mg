@@ -858,8 +858,7 @@ class BSettings(Tk.Toplevel):
 
             else: # We need to get remove of the cpu lines. Pop them out of the array and remove them from the list.
                 self.parent.FigWrap.RemoveCpuDomainLines()
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
 
     def OnClosing(self):
         self.parent.settings_window = None

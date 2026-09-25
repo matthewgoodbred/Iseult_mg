@@ -1276,8 +1276,7 @@ class FieldSettings(Tk.Toplevel):
                 self.parent.right_loc = self.parent.parent.MainParamDict['FFTRight'] + self.parent.parent.shock_loc*self.parent.parent.MainParamDict['FFTRelative']
                 self.parent.right_loc = min(self.parent.right_loc, self.parent.xmax)
                 self.parent.lineright.set_xdata([self.parent.right_loc,self.parent.right_loc])
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
 
     def CPUVarHandler(self, *args):
         if self.parent.GetPlotParam('show_cpu_domains')== self.CPUVar.get():
@@ -1289,8 +1288,7 @@ class FieldSettings(Tk.Toplevel):
 
             else: # We need to get remove of the cpu lines. Pop them out of the array and remove them from the list.
                 self.parent.FigWrap.RemoveCpuDomainLines()
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
 
     def NormFieldHandler(self, *args):
         if self.parent.GetPlotParam('normalize_fields') == self.NormFieldVar.get():

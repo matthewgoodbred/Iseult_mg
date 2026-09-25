@@ -1051,16 +1051,14 @@ class SpectraSettings(Tk.Toplevel):
             self.eTempNormVar.set(self.sliderTe.get())
             self.parent.SetPlotParam('eNormalizer', self.sliderTe.get(), update_plot= False)
             self.parent.refresh()
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
     def BoostHandler(self):
         # if changing the scale will change the value of the parameter, do so
         if self.BoostVar.get() != self.parent.GetPlotParam('BoostedIons'):
             self.parent.boostedIonSpect[0].set_visible(self.BoostVar.get())
             self.parent.SetPlotParam('BoostedIons', self.BoostVar.get(), update_plot= False)
             self.parent.refresh()
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
 
     def TiScaleHandler(self, e):
         # if changing the scale will change the value of the parameter, do so
@@ -1068,8 +1066,7 @@ class SpectraSettings(Tk.Toplevel):
             self.iTempNormVar.set(self.sliderTi.get())
             self.parent.SetPlotParam('iNormalizer', self.sliderTi.get(), update_plot= False)
             self.parent.refresh()
-            self.parent.parent.canvas.draw()
-            self.parent.parent.canvas.get_tk_widget().update_idletasks()
+            self.parent.parent.canvas.draw_idle()
 
     def ctypeChanged(self, *args):
         if self.ctypevar.get() == self.parent.chartType:
@@ -1158,8 +1155,7 @@ class SpectraSettings(Tk.Toplevel):
             if np.abs(float(self.delgameVar.get()) - self.parent.GetPlotParam('DelGame')) > 1E-12:
                 self.parent.SetPlotParam('DelGame', float(self.delgameVar.get()), update_plot = False)
                 self.parent.refresh()
-                self.parent.parent.canvas.draw()
-                self.parent.parent.canvas.get_tk_widget().update_idletasks()
+                self.parent.parent.canvas.draw_idle()
 
         except ValueError:
             #if they type in random stuff, just set it ot the param value
@@ -1173,8 +1169,7 @@ class SpectraSettings(Tk.Toplevel):
             if np.abs(float(self.delgampVar.get()) - self.parent.GetPlotParam('DelGami')) > 1E-12:
                 self.parent.SetPlotParam('DelGami', float(self.delgampVar.get()), update_plot=False)
                 self.parent.refresh()
-                self.parent.parent.canvas.draw()
-                self.parent.parent.canvas.get_tk_widget().update_idletasks()
+                self.parent.parent.canvas.draw_idle()
 
 
 

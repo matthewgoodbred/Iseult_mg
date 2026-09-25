@@ -116,8 +116,7 @@ class EnergyPanel:
             for i in xrange(len(self.IntRegionLines)):
                 self.IntRegionLines.pop(0).remove()
         # Update the canvas
-        self.parent.canvas.draw()
-        self.parent.canvas.get_tk_widget().update_idletasks()
+        self.parent.canvas.draw_idle()
 
 
     def ChangePlotType(self, str_arg):

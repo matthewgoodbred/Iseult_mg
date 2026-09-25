@@ -558,10 +558,10 @@ class PlaybackBar(Tk.Frame):
             self.parent.MainParamDict['LoopPlayback'] = self.LoopVar.get()
 
     def SkipLeft(self, e = None):
-        self.param.set(self.param.value - self.parent.MainParamDict['SkipSize'])
+        self.parent.StepInteractively(lambda: self.param.set(self.param.value - self.parent.MainParamDict['SkipSize']))
 
     def SkipRight(self, e = None):
-        self.param.set(self.param.value + self.parent.MainParamDict['SkipSize'])
+        self.parent.StepInteractively(lambda: self.param.set(self.param.value + self.parent.MainParamDict['SkipSize']))
 
     def PlayHandler(self, e = None):
         if not self.playPressed:
@@ -644,7 +644,7 @@ class PlaybackBar(Tk.Frame):
         try:
             #make sure the user types in a int
             if int(self.tstep.get()) != self.param.value:
-                self.param.set(int(float(self.tstep.get())))
+                self.parent.StepInteractively(lambda: self.param.set(int(float(self.tstep.get()))))
         except ValueError:
             #if they type in random stuff, just set it ot the param value
             self.tstep.set(str(self.param.value))
@@ -660,7 +660,7 @@ class PlaybackBar(Tk.Frame):
 
     def UpdateValue(self, *args):
         if int(self.slider.get()) != self.param.value:
-            self.param.set(int(self.slider.get()))
+            self.parent.StepInteractively(lambda: self.param.set(int(self.slider.get())))
     def setKnob(self, value):
         pass
 #        #set the text entry value
@@ -2044,6 +2044,11 @@ class MainApp(Tk.Tk):
         self.measure_window = None
         self.preset_window = None
 
+        # Time steps taken from the playback bar are drawn once Tk is idle;
+        # see setKnob and StepInteractively.
+        self._defer_step_render = False
+        self._pending_step_render = None
+
 
         self.cmd_args = cmd_args
 #        if self.cmd_args.r:
@@ -3298,6 +3303,12 @@ class MainApp(Tk.Tk):
         the plot went from 2d to 1D, etc.. If any change occurs that requires a
         redraw, renewcanvas must be called with ForceRedraw = True. '''
 
+        # This renews the figure at the current time step, which is all a
+        # step still waiting to be drawn would have done.
+        if self._pending_step_render is not None:
+            self.after_cancel(self._pending_step_render)
+            self._pending_step_render = None
+
         self.SaveLLoc()
         if ForceRedraw:
             self.ReDrawCanvas(keep_view = keep_view)
@@ -3405,13 +3416,17 @@ class MainApp(Tk.Tk):
         # and rebuilt from the new axes by LoadView.
         self.toolbar._nav_stack.clear()
 
+        # Figure.clf() would first clear every axes, rebuilding all its ticks,
+        # only to throw it away straight after; removing the axes first skips
+        # that, which is a good part of the cost of a redraw. The empty figure
+        # is not drawn either: the full one replaces it before Tk is next idle,
+        # and drawing it would only flash a blank frame over a remote display.
+        for ax in list(self.f.axes):
+            self.f.delaxes(ax)
         self.f.clf()
         # Which axes are colorbars is worked out as the panels are drawn, and
         # the axes recorded last time no longer exist.
         self.cbarList = []
-        #
-        if self.MainParamDict['ClearFig']:
-            self.canvas.draw()
 
         self.LoadAllKeys()
 
@@ -3536,8 +3551,11 @@ class MainApp(Tk.Tk):
                     subplot.graph._in_refresh = False
 
         self.AlignSharedAxes()
-        self.canvas.draw()
-        self.canvas.get_tk_widget().update_idletasks()
+        # Drawn once Tk is idle, so that any other changes made in response to
+        # the same events are drawn along with these rather than each costing
+        # a full render. Anything that needs the pixels now (saving a frame,
+        # the movie writer) renders the figure itself.
+        self.canvas.draw_idle()
 
 
         if self.MainParamDict['Recording']:
@@ -3645,8 +3663,8 @@ class MainApp(Tk.Tk):
                     subplot.graph._in_refresh = False
 
         self.AlignSharedAxes()
-        self.canvas.draw()
-        self.canvas.get_tk_widget().update_idletasks()
+        # Drawn once Tk is idle; see ReDrawCanvas.
+        self.canvas.draw_idle()
 
         if self.MainParamDict['Recording']:
             self.PrintFig()
@@ -4115,11 +4133,34 @@ class MainApp(Tk.Tk):
 
         else:
         """
-        self.RenewCanvas()
+        if self._defer_step_render and not self.MainParamDict['Recording']:
+            # Stepped from the playback bar: draw once Tk is idle, by which
+            # time any further steps already queued (e.g. from a held arrow
+            # key) have been taken, so only the step the user ends up on is
+            # loaded and drawn. While recording, every step is drawn so that
+            # every step is saved.
+            if self._pending_step_render is None:
+                self._pending_step_render = self.after_idle(self._RenderPendingStep)
+        else:
+            self.RenewCanvas()
 
         self.playbackbar.tstep.set(str(value))
         #set the slider
         self.playbackbar.slider.set(value)
+
+    def StepInteractively(self, change_step):
+        '''Call change_step, which sets self.TimeStep, deferring the redraw
+        it causes until Tk is idle. Everything else that sets the time step,
+        e.g. MakeAMovie, still has the figure redrawn before set returns.'''
+        self._defer_step_render = True
+        try:
+            change_step()
+        finally:
+            self._defer_step_render = False
+
+    def _RenderPendingStep(self):
+        self._pending_step_render = None
+        self.RenewCanvas()
 
     def OpenSettings(self, *args):
         if self.settings_window is None:

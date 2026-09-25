@@ -185,8 +185,7 @@ def __show_streamline_handler(settings, panel):
     else:
         settings.parent.parent.LoadAllKeys()
 
-    settings.parent.parent.canvas.draw()
-    settings.parent.parent.canvas.get_tk_widget().update_idletasks()
+    settings.parent.parent.canvas.draw_idle()
 
 
 def __change_streamline_field(settings, panel):
@@ -226,8 +225,7 @@ def __show_az_contours_handler(settings, panel):
             settings.parent.parent._lagrangian_tracker = None
         settings.parent.parent.LoadAllKeys()
 
-    settings.parent.parent.canvas.draw()
-    settings.parent.parent.canvas.get_tk_widget().update_idletasks()
+    settings.parent.parent.canvas.draw_idle()
 
 
 def streamlines_callback(settings, update_plot=True):
