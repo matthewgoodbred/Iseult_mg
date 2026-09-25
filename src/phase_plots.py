@@ -3,14 +3,12 @@ import tkinter as Tk
 from tkinter import ttk
 import matplotlib
 import numpy as np
-import numpy.ma as ma
 import new_cmaps
-from new_cnorms import PowerNormWithNeg
-from Numba2DHist import Fast2DHist, Fast2DWeightedHist, vecLog10Norm
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
 import plot_axes
+import phase_space
 
 class PhasePanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -39,33 +37,30 @@ class PhasePanel:
                        'E_max': 200.0,
                        'set_p_min': False,
                        'set_p_max': False,
+                       # The limits of the horizontal axis
+                       'h_min': 0.0,
+                       'h_max': 1.0,
+                       'set_h_min': False,
+                       'set_h_max': False,
+                       'equal_aspect': False,
                        'spatial_x': True,
                        'spatial_y': False,
                        'symmetric': False,
                        'interpolation': 'nearest',
                        'filter_by_viewport': True,
-                       'face_color': 'gainsboro'}
+                       'face_color': 'gainsboro',
+                       # The quantities on the horizontal and vertical axes,
+                       # from phase_space.QUANTITIES. None falls back to the
+                       # legacy 'plot_axis' and 'mom_dim' params.
+                       'phase_x': None,
+                       'phase_y': None}
 
-    # A phase plot is drawn as an image, but only its horizontal axis is
-    # spatial, so it opts out of the default 2D axis handling.
+    # 'plot_axis' is only kept so that views saved before 'phase_x' existed
+    # still load; a phase plot has no rotation toggle.
     plot_axes.add_axis_params(plot_param_dict, two_d=False)
 
 
     prtl_opts = ['proton_p', 'electron_p']
-    direction_opts = ['x-x', 'y-x', 'z-x']
-    # Old labels:
-    #ylabel_list =[
-    #              [[r'$P_{px}\ [m_i c]$', r'$P_{py}\ [m_i c]$',r'$P_{pz}\ [m_i c]$'],
-    #              [r'$P_{ex}\ [m_e c]$', r'$P_{ey}\ [m_e c]$',r'$P_{ez}\ [m_e c]$']],
-    #              [[r'$P\prime_{px}\ [m_i c]$', r'$P\prime_{py}\ [m_i c]$',r'$P\prime_{pz}\ [m_i c]$'],
-    #              [r'$P\prime_{ex}\ [m_e c]$', r'$P\prime_{ey}\ [m_e c]$',r'$P\prime_{ez}\ [m_e c]$']]
-    #             ]
-    ylabel_list =[
-                 [[r'$\gamma_i\beta_{x,i}$',r'$\gamma_i\beta_{y,i}$',r'$\gamma_i\beta_{z,i}$'],
-                  [r'$\gamma_e\beta_{x,e}$',r'$\gamma_e\beta_{y,e}$',r'$\gamma_e\beta_{z,e}$']],
-                 [[r'$\gamma\prime_i\beta\prime_{x,i}$',r'$\gamma\prime_i\beta\prime_{y,i}$',r'$\gamma\prime_i\beta\prime_{z,i}$'],
-                  [r'$\gamma\prime_e\beta\prime_{x,e}$',r'$\gamma\prime_e\beta\prime_{y,e}$',r'$\gamma\prime_e\beta\prime_{z,e}$']]
-                 ]
 
     gradient =  np.linspace(0, 1, 256)# A way to make the colorbar display better
     gradient = np.vstack((gradient, gradient))
@@ -99,9 +94,9 @@ class PhasePanel:
         # This should only be called by the user-interaction when all the plots already exist...
         # so we can take some shortcut  s and assume a lot of things are already created.
         self.SetPlotParam('show_int_region', self.IntRegVar.get(), update_plot = False)
-        # The spectral integration region is a range in x, so it means nothing
-        # on a panel plotted against another axis.
-        if self.IntRegVar.get() == True and plot_axes.shows_axis(self, 'x'):
+        # The spectral integration region is a range in x, drawn as vertical
+        # lines, so it only means something when x runs horizontally.
+        if self.IntRegVar.get() == True and plot_axes.marker_orientation(self, 'x') == 'v':
             # We need to show the integration region.
 
             # Look for all the spectra plots and plot the lines.
@@ -139,29 +134,39 @@ class PhasePanel:
 
         # CLOSES IF. NOW IF WE TURN OFF THE INTEGRATION REGIONS, we have to delete all the lines.
         else:
-            for i in xrange(len(self.IntRegionLines)):
+            for i in range(len(self.IntRegionLines)):
                 self.IntRegionLines.pop(0).remove()
         # Update the canvas
-        self.parent.canvas.draw()
-        self.parent.canvas.get_tk_widget().update_idletasks()
+        self.parent.canvas.draw_idle()
 
-    def positions(self, prtl_type):
-        '''The particle positions the histogram runs along, in c/omega_pe.
+    def phase_axes(self):
+        '''The (horizontal, vertical) quantities the user has chosen.'''
+        return phase_space.phase_axes(self.GetPlotParam)
 
-        Falls back to x if the data does not hold the chosen coordinate, which
-        is the case for a 1D run.
-        '''
-        axis = plot_axes.plot_axis_name(self)
-        coord = plot_axes.load_positions(self, prtl_type, axis)
-        if coord is None and axis != 'x':
-            self.SetPlotParam('plot_axis', 0, update_plot = False)
-            self.prof_axis = 'x'
-            coord = plot_axes.load_positions(self, prtl_type, 'x')
-        return coord
+    def shown_axes(self):
+        '''The (horizontal, vertical) quantities actually plotted, which differ
+        from phase_axes only when the data lacks a chosen coordinate.'''
+        return getattr(self, 'horiz', None) or self.phase_axes()[0], \
+               getattr(self, 'vert', None) or self.phase_axes()[1]
 
     def spatial_plot_axes(self):
-        '''The physical axes of this panel: the momentum axis is not one.'''
-        return plot_axes.plot_axis_name(self), None
+        '''The physical axes of this panel: None for an axis that is not a position.'''
+        return tuple(q if phase_space.is_spatial(q) else None for q in self.shown_axes())
+
+    def shares_both_axes(self):
+        '''Whether both axes are linked to other panels, in which case
+        matplotlib can only keep the aspect by changing the limits.'''
+        axes = getattr(self, 'axes', None)
+        if axes is None:
+            return False
+        return len(axes.get_shared_x_axes().get_siblings(axes)) > 1 \
+            and len(axes.get_shared_y_axes().get_siblings(axes)) > 1
+
+    def boost(self):
+        '''The (Gamma, beta) of the Lorentz boost set in the main window, or None.'''
+        if not self.parent.MainParamDict['DoLorentzBoost']:
+            return None
+        return phase_space.boost_factors(self.parent.MainParamDict['GammaBoost'])
 
     def ChangePlotType(self, str_arg):
         self.FigWrap.ChangeGraph(str_arg)
@@ -178,47 +183,20 @@ class PhasePanel:
         '''A helper function that will insure that each hdf5 file will only be
         opened once per time step'''
         self.arrs_needed = ['c_omp', 'bx', 'istep', 'me', 'mi']
-        # First see if we will need to know the energy of the particle
-        # (requied for lorentz boosts and setting e_min and e_max)
-        Need_Energy = self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8
-        Need_Energy = Need_Energy or self.GetPlotParam('set_E_min')
-        Need_Energy = Need_Energy or self.GetPlotParam('set_E_max')
-
-        # The coordinate the histogram runs along, plus x, which is still used
-        # to place the shock and the spectral integration region.
         prtl_type = self.GetPlotParam('prtl_type')
-        needed_axes = {'x', plot_axes.plot_axis_name(self)}
+        horiz, vert = self.phase_axes()
 
-        if prtl_type == 0:
-            self.arrs_needed.append('xi')
-            if self.GetPlotParam('weighted'):
-                self.arrs_needed.append('chi')
-            if Need_Energy:
-                self.arrs_needed.append('ui')
-                self.arrs_needed.append('vi')
-                self.arrs_needed.append('wi')
-            elif self.GetPlotParam('mom_dim') == 0:
-                self.arrs_needed.append('ui')
-            elif self.GetPlotParam('mom_dim') == 1:
-                self.arrs_needed.append('vi')
-            elif self.GetPlotParam('mom_dim') == 2:
-                self.arrs_needed.append('wi')
+        # Energy cuts and boosts need all three components of the momentum.
+        all_components = self.boost() is not None \
+            or self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max')
+        self.arrs_needed += phase_space.momentum_keys_needed(prtl_type, (horiz, vert), all_components)
 
-        if prtl_type == 1:
-            self.arrs_needed.append('xe')
-            if self.GetPlotParam('weighted'):
-                self.arrs_needed.append('che')
-            if Need_Energy:
-                self.arrs_needed.append('ue')
-                self.arrs_needed.append('ve')
-                self.arrs_needed.append('we')
-            elif self.GetPlotParam('mom_dim') == 0:
-                self.arrs_needed.append('ue')
-            elif self.GetPlotParam('mom_dim') == 1:
-                self.arrs_needed.append('ve')
-            elif self.GetPlotParam('mom_dim') == 2:
-                self.arrs_needed.append('we')
+        if self.GetPlotParam('weighted'):
+            self.arrs_needed.append(phase_space.WEIGHT_KEYS[prtl_type])
 
+        # The positions plotted, plus x, which counts the particles and places
+        # the shock and the spectral integration region.
+        needed_axes = {'x'} | {q for q in (horiz, vert) if phase_space.is_spatial(q)}
         if self.GetPlotParam('filter_by_viewport') and self.parent.is_viewport_zoomed():
             # The region selected in a 2D panel can constrain any coordinate.
             needed_axes |= {'y', 'z'}
@@ -239,272 +217,104 @@ class PhasePanel:
             if self.viewport is not None:
                 self.parent.last_phase_viewport = self.viewport
 
-        self.key_name = str(self.GetPlotParam('pbins')) + 'x' + str(self.GetPlotParam('xbins'))
+        prtl_type = self.GetPlotParam('prtl_type')
+        horiz, vert = self.phase_axes()
+        boost = self.boost()
 
+        self.key_name = 'phase_' + horiz + '_' + vert + '_'
+        self.key_name += str(self.GetPlotParam('pbins')) + 'x' + str(self.GetPlotParam('xbins'))
         if self.GetPlotParam('masked'):
             self.key_name += 'masked_'
-
         if self.GetPlotParam('weighted'):
             self.key_name += 'weighted_'
-
         if self.GetPlotParam('set_E_min'):
             self.key_name += 'Emin_'+str(self.GetPlotParam('E_min')) + '_'
-
         if self.GetPlotParam('set_E_max'):
             self.key_name += 'Emax_'+str(self.GetPlotParam('E_max')) + '_'
-
-        if self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8:
+        if boost is not None:
             self.key_name += 'boosted_'+ str(self.parent.MainParamDict['GammaBoost'])+'_'
-
-        self.key_name += self.prtl_opts[self.GetPlotParam('prtl_type')]
-        self.key_name += self.direction_opts[self.GetPlotParam('mom_dim')]
+        self.key_name += self.prtl_opts[prtl_type]
         self.key_name += str(int(self.parent.MainParamDict['PrtlStride']))
-        self.key_name += '_vs' + plot_axes.plot_axis_name(self)
         self.key_name += plot_axes.viewport_key(self.viewport)
+        self.key_name += phase_space.limits_key(self.GetPlotParam)
+
+        self.c_omp = self.FigWrap.LoadKey('c_omp')
+        self.istep = self.FigWrap.LoadKey('istep')
 
         if self.key_name in self.parent.DataDict.keys():
-            self.hist2d = self.parent.DataDict[self.key_name]
+            self.hist2d, (self.horiz, self.vert) = self.parent.DataDict[self.key_name]
+            return
 
-        elif self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8:
-            # Gotta boost it
-            self.c_omp = self.FigWrap.LoadKey('c_omp')
-            self.istep = self.FigWrap.LoadKey('istep')
-            self.weights = None
-            self.x_values = None
-            self.y_values = None
-            self.prof_axis = plot_axes.plot_axis_name(self)
+        # A stride that leaves a single particle hands back a scalar.
+        def load(key):
+            return np.atleast_1d(self.FigWrap.LoadKey(key))
 
-            # The extent of the domain along the axis the histogram runs along,
-            # before boostin'
-            self.xmin = 0
-            self.xmax = plot_axes.domain_extent(self, self.prof_axis)
-            self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
+        # Every particle has an x, so it fixes how many particles there are,
+        # which is how a coordinate missing from the data is recognised.
+        n_prtls = len(load(plot_axes.PRTL_POS_KEYS[prtl_type]['x']))
 
-            # First calculate beta and gamma
-            if self.parent.MainParamDict['GammaBoost'] >=1:
-                self.GammaBoost = self.parent.MainParamDict['GammaBoost']
-                self.betaBoost = np.sqrt(1-1/self.parent.MainParamDict['GammaBoost']**2)
-            elif self.parent.MainParamDict['GammaBoost'] >-1:
-                self.betaBoost = self.parent.MainParamDict['GammaBoost']
-                self.GammaBoost = np.sqrt(1-self.betaBoost**2)**(-1)
-
-            else:
-                self.GammaBoost = -self.parent.MainParamDict['GammaBoost']
-                self.betaBoost = -np.sqrt(1-1/self.parent.MainParamDict['GammaBoost']**2)
-
-
-
-            # Now load the data. We require all 3 dimensions to determine
-            # the velocity and LF in the boosted frame.
-            if self.GetPlotParam('prtl_type') == 0:
-                # first load everything downstream frame
-                self.x_values = self.positions(0)
-
-                u = self.FigWrap.LoadKey('ui')
-                v = self.FigWrap.LoadKey('vi')
-                w = self.FigWrap.LoadKey('wi')
-                if self.GetPlotParam('weighted'):
-                    self.weights = self.FigWrap.LoadKey('chi')
-
-            if self.GetPlotParam('prtl_type') == 1: #electons
-                self.x_values = self.positions(1)
-                u = self.FigWrap.LoadKey('ue')
-                v = self.FigWrap.LoadKey('ve')
-                w = self.FigWrap.LoadKey('we')
-
-                if self.GetPlotParam('weighted'):
-                    self.weights = self.FigWrap.LoadKey('che')
-
-
-            # Now calculate gamma of the particles in downstream restframe
-            gamma_ds = np.sqrt(u**2+v**2+w**2+1)
-
-
-
-            # calculate the velocities from the momenta
-            vx = u/gamma_ds
-            vy = v/gamma_ds
-            vz = w/gamma_ds
-
-            # Now calculate the velocities in the boosted frames
-            tmp_helper = 1-vx*self.betaBoost
-            vx_prime = (vx-self.betaBoost)/tmp_helper
-            vy_prime = vy/self.GammaBoost/tmp_helper
-            vz_prime = vz/self.GammaBoost/tmp_helper
-
-            # Now calculate the LF in the boosted frames using rapidity
-            # Initial rapidity
-            rap_prtl = np.arccosh(gamma_ds)
-            rap_boost = np.arccosh(self.GammaBoost)
-
-            gamma_prime = gamma_ds*self.GammaBoost-np.sign(u)*np.sign(self.betaBoost)*np.sinh(rap_prtl)*np.sinh(rap_boost)/np.sqrt(1+(v/u)**2+(w/u)**2)
-
-            if self.GetPlotParam('mom_dim') == 0:
-                self.y_values  = vx_prime*gamma_prime
-            if self.GetPlotParam('mom_dim') == 1:
-                self.y_values  = vy_prime*gamma_prime
-            if self.GetPlotParam('mom_dim') == 2:
-                self.y_values  = vz_prime*gamma_prime
-
-            # Some of the values are becoming NaN.
-            nan_ind = np.isnan(self.y_values)
-
-            inRange = np.ones(len(self.y_values), dtype=bool)
-
-            if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
-                # We need to calculate the total energy in units m_e c^2
-                if self.GetPlotParam('prtl_type')==0:
-                    energy = gamma_ds*self.FigWrap.LoadKey('mi')/self.FigWrap.LoadKey('me')
-                else:
-                    energy = np.copy(gamma_ds)
-
-                # Now find the particles that fall in our range
-                if self.GetPlotParam('set_E_min'):
-                    inRange &= energy >= self.FigWrap.GetPlotParam('E_min')
-                if self.GetPlotParam('set_E_max'):
-                    inRange &= energy <= self.FigWrap.GetPlotParam('E_max')
-
-            # Keep only the particles inside the region picked out in a 2D
-            # panel, and, if that region constrains the axis this histogram
-            # runs along, bin over that range only.
-            if self.viewport is not None:
-                own_range = plot_axes.filter_by_viewport(self, self.viewport,
-                                                         self.GetPlotParam('prtl_type'), inRange)
-                if own_range is not None:
-                    self.xmin, self.xmax = own_range
-
-            inRange &= np.logical_not(nan_ind)
-
-            # Calculate pmin and pmax after filtering!
-            self.pmin = 0.0 if len(self.y_values[inRange]) == 0 else min(self.y_values[inRange])
-            self.pmax = 0.0 if len(self.y_values[inRange]) == 0 else max(self.y_values[inRange])
-            self.pmax = self.pmax if (self.pmax != self.pmin) else self.pmin + 1
-
-            if self.GetPlotParam('weighted'):
-                self.hist2d = Fast2DWeightedHist(self.y_values[inRange], self.x_values[inRange], self.weights[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
-            else:
-                self.hist2d = Fast2DHist(self.y_values[inRange], self.x_values[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
-
+        def positions(axis):
             try:
-                if self.GetPlotParam('masked'):
-                    zval = ma.masked_array(self.hist2d[0])
-                    zval[zval == 0] = ma.masked
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
+                coord = load(plot_axes.PRTL_POS_KEYS[prtl_type][axis])
+            except KeyError:
+                return None
+            if coord.ndim != 1 or coord.shape[0] != n_prtls:
+                return None
+            return coord / self.c_omp
+
+        quantities = phase_space.ParticleQuantities(load, positions, prtl_type, boost)
+
+        # A 1D or 2D run may not hold the chosen coordinate; show x instead.
+        self.horiz, self.vert = [q if quantities(q) is not None else 'x' for q in (horiz, vert)]
+        h_values = quantities(self.horiz)
+        v_values = quantities(self.vert)
+
+        in_range = np.isfinite(h_values) & np.isfinite(v_values)
+
+        if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
+            # The energy of each particle in units of m_e c^2
+            energy = quantities.lab_gamma()
+            if prtl_type == 0:
+                energy = energy*self.FigWrap.LoadKey('mi')/self.FigWrap.LoadKey('me')
+            if self.GetPlotParam('set_E_min'):
+                in_range &= energy >= self.GetPlotParam('E_min')
+            if self.GetPlotParam('set_E_max'):
+                in_range &= energy <= self.GetPlotParam('E_max')
+
+        # Keep only the particles inside the region picked out in a 2D panel,
+        # and bin any position the region constrains over that range only.
+        ranges = {}
+        for axis, low, high in (self.viewport or ()):
+            coord = quantities(axis) if axis is not None else None
+            if coord is None:
+                continue
+            in_range &= (coord >= low) & (coord <= high)
+            ranges[axis] = (low, high)
+
+        def axis_range(quantity, values, axis):
+            '''The range to bin over, which the limits set in the settings
+            window override so that all of the bins land inside the plot.'''
+            if phase_space.is_spatial(quantity):
+                if quantity in ranges:
+                    default = ranges[quantity]
                 else:
-                    zval = np.copy(self.hist2d[0])
-                    zval[zval==0] = 0.5
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval.min(), zval.max()]
-            except ValueError:
-                tmplist=[0.1,1]
-            self.hist2d = zval, self.hist2d[1], self.hist2d[2], tmplist
-
-            self.parent.DataDict[self.key_name] = self.hist2d
-
-
-        else:
-            # Generate the X-axis values
-            self.c_omp = self.FigWrap.LoadKey('c_omp')
-            self.istep = self.FigWrap.LoadKey('istep')
-            self.weights = None
-            self.x_values = None
-            self.y_values = None
-            self.prof_axis = plot_axes.plot_axis_name(self)
-
-            # Choose the particle type and px, py, or pz
-            if self.GetPlotParam('prtl_type') == 0: #protons
-                self.x_values = self.positions(0)
-                if self.GetPlotParam('weighted'):
-                    self.weights = self.FigWrap.LoadKey('chi')
-                if self.GetPlotParam('mom_dim') == 0:
-                    self.y_values = self.FigWrap.LoadKey('ui')
-                if self.GetPlotParam('mom_dim') == 1:
-                    self.y_values = self.FigWrap.LoadKey('vi')
-                if self.GetPlotParam('mom_dim') == 2:
-                    self.y_values = self.FigWrap.LoadKey('wi')
-
-            if self.GetPlotParam('prtl_type') == 1: #electons
-                self.energy_color = self.parent.electron_color
-                self.x_values = self.positions(1)
-                if self.GetPlotParam('weighted'):
-                    self.weights = self.FigWrap.LoadKey('che')
-                if self.GetPlotParam('mom_dim') == 0:
-                    self.y_values = self.FigWrap.LoadKey('ue')
-                if self.GetPlotParam('mom_dim') == 1:
-                    self.y_values = self.FigWrap.LoadKey('ve')
-                if self.GetPlotParam('mom_dim') == 2:
-                    self.y_values = self.FigWrap.LoadKey('we')
-
-            self.xmin = 0
-            self.xmax = plot_axes.domain_extent(self, self.prof_axis)
-            self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
-
-            inRange = np.ones(len(self.y_values), dtype=bool)
-
-            if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
-                # We need to calculate the total energy of each particle in
-                # units m_e c^2
-
-                # First load the data. We require all 3 dimensions of momentum
-                # to determine the energy in the downstream frame
-                if self.GetPlotParam('prtl_type') == 0:
-                    u = self.FigWrap.LoadKey('ui')
-                    v = self.FigWrap.LoadKey('vi')
-                    w = self.FigWrap.LoadKey('wi')
-
-                if self.GetPlotParam('prtl_type') == 1: #electons
-                    u = self.FigWrap.LoadKey('ue')
-                    v = self.FigWrap.LoadKey('ve')
-                    w = self.FigWrap.LoadKey('we')
-
-                # Now calculate LF of the particles in downstream restframe
-                energy = np.sqrt(u**2+v**2+w**2+1)
-                # If they are electrons this already the energy in units m_e c^2.
-                # Otherwise...
-                if self.GetPlotParam('prtl_type')==0:
-                    energy *= self.FigWrap.LoadKey('mi')/self.FigWrap.LoadKey('me')
-
-                # Now find the particles that fall in our range
-                if self.GetPlotParam('set_E_min'):
-                    inRange &= energy >= self.FigWrap.GetPlotParam('E_min')
-                if self.GetPlotParam('set_E_max'):
-                    inRange &= energy <= self.FigWrap.GetPlotParam('E_max')
-
-            # Keep only the particles inside the region picked out in a 2D
-            # panel, and, if that region constrains the axis this histogram
-            # runs along, bin over that range only.
-            if self.viewport is not None:
-                own_range = plot_axes.filter_by_viewport(self, self.viewport,
-                                                         self.GetPlotParam('prtl_type'), inRange)
-                if own_range is not None:
-                    self.xmin, self.xmax = own_range
-
-            # Calculate pmin and pmax after filtering!
-            self.pmin = 0.0 if len(self.y_values[inRange]) == 0 else min(self.y_values[inRange])
-            self.pmax = 0.0 if len(self.y_values[inRange]) == 0 else max(self.y_values[inRange])
-            self.pmax = self.pmax if (self.pmax != self.pmin) else self.pmin + 1
-
-            if self.GetPlotParam('weighted'):
-                self.hist2d = Fast2DWeightedHist(self.y_values[inRange], self.x_values[inRange], self.weights[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
+                    high = plot_axes.domain_extent(self, quantity)
+                    default = (0.0, high if high != 0 else 1.0)
             else:
-                self.hist2d = Fast2DHist(self.y_values[inRange], self.x_values[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
+                default = phase_space.data_range(values[in_range])
+            return phase_space.limited_range(default, self.GetPlotParam, axis)
 
-            try:
-                if self.GetPlotParam('masked'):
-                    zval = ma.masked_array(self.hist2d[0])
-                    zval[zval == 0] = ma.masked
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
-                else:
-                    zval = np.copy(self.hist2d[0])
-                    zval[zval==0] = 0.5
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval.min(), zval.max()]
-            except ValueError:
-                tmplist = [0.1,1]
-            self.hist2d = zval, self.hist2d[1], self.hist2d[2], tmplist
-            self.parent.DataDict[self.key_name] = self.hist2d
+        weights = None
+        if self.GetPlotParam('weighted'):
+            weights = load(phase_space.WEIGHT_KEYS[prtl_type])[in_range]
+
+        self.hist2d = phase_space.histogram(h_values[in_range], v_values[in_range],
+                                            axis_range(self.horiz, h_values, 'h'),
+                                            axis_range(self.vert, v_values, 'p'),
+                                            self.GetPlotParam('xbins'), self.GetPlotParam('pbins'),
+                                            weights = weights,
+                                            masked = self.GetPlotParam('masked'))
+        self.parent.DataDict[self.key_name] = self.hist2d, (self.horiz, self.vert)
 
     def UpdateLabelsandColors(self):
         # set the colors
@@ -515,16 +325,20 @@ class PhasePanel:
 
         for line in self.IntRegionLines:
             line.set_color(self.energy_color)
-        #set the xlabels
-        self.prof_axis = plot_axes.plot_axis_name(self)
-        # The boost is along x, so only x is a primed coordinate.
-        boosted = self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8
-        if boosted and self.prof_axis == 'x':
-            self.x_label = r'$x\prime\ [c/\omega_{\rm pe}]$'
-        else:
-            self.x_label = plot_axes.AXIS_LABELS[self.prof_axis]
-        #set the ylabel
-        self.y_label  = self.ylabel_list[self.parent.MainParamDict['DoLorentzBoost']][self.GetPlotParam('prtl_type')][self.GetPlotParam('mom_dim')]
+        boosted = self.boost() is not None
+        horiz, vert = self.shown_axes()
+        self.x_label = phase_space.axis_label(horiz, self.GetPlotParam('prtl_type'), boosted)
+        self.y_label = phase_space.axis_label(vert, self.GetPlotParam('prtl_type'), boosted)
+
+    def sampling_description(self):
+        '''A sentence saying which particles the histogram is made from.'''
+        if not self.GetPlotParam('filter_by_viewport'):
+            return 'Using every particle in the domain.'
+        viewport = getattr(self, 'viewport', None)
+        if not viewport:
+            return 'Using every particle. Zoom a 2D panel to use only the particles it shows.'
+        parts = [f'{axis} ∈ [{low:.4g}, {high:.4g}]' for axis, low, high in viewport if axis is not None]
+        return 'Using the particles in the zoomed view: ' + ', '.join(parts)
 
     def draw(self):
         # In order to speed up the plotting, we only recalculate everything
@@ -557,10 +371,10 @@ class PhasePanel:
 
         self.gs = gridspec.GridSpecFromSubplotSpec(100,100, subplot_spec = self.parent.gs0[self.FigWrap.pos])#, bottom=0.2,left=0.1,right=0.95, top = 0.95)
 
-        # A phase plot only shares the spatial axis it is plotted against.
+        # A phase plot only shares the axes that are positions.
         share_x_ax, share_y_ax = self.parent.GetSharedAxes(self.FigWrap.pos)
         self.axes = self.figure.add_subplot(self.gs[self.parent.axes_extent[0]:self.parent.axes_extent[1], self.parent.axes_extent[2]:self.parent.axes_extent[3]],
-                                           sharex = share_x_ax)
+                                           sharex = share_x_ax, sharey = share_y_ax)
 
         self.cax = self.axes.imshow(self.hist2d[0],
                                     cmap = new_cmaps.cmaps[self.parent.MainParamDict['ColorMap']],
@@ -671,6 +485,13 @@ class PhasePanel:
         self.axes.set_xlabel(self.x_label, labelpad = self.parent.MainParamDict['xLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
         self.axes.set_ylabel(self.y_label, labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
 
+        # A position follows the limits set in the main window when the
+        # spatial axes are linked. The vertical limits set in this panel's
+        # settings win over those.
+        horiz, vert = self.spatial_plot_axes()
+        linked = self.parent.MainParamDict['LinkSpatial'] == 1
+        if linked and vert is not None:
+            self.ymin, self.ymax = plot_axes.limits_for_axis(self, vert) or (self.ymin, self.ymax)
         if self.GetPlotParam('set_p_min'):
             self.ymin = self.GetPlotParam('p_min')
         if self.GetPlotParam('set_p_max'):
@@ -680,10 +501,21 @@ class PhasePanel:
             self.ymax = abs(self.ymin)
         self.axes.set_ylim(self.ymin, self.ymax)
 
-        if self.parent.MainParamDict['LinkSpatial'] == 1:
-            plot_axes.apply_limits(self, (self.xmin, self.xmax))
-        else:
-            self.axes.set_xlim(self.xmin,self.xmax)
+        if linked and horiz is not None:
+            self.xmin, self.xmax = plot_axes.limits_for_axis(self, horiz) or (self.xmin, self.xmax)
+        if self.GetPlotParam('set_h_min'):
+            self.xmin = self.GetPlotParam('h_min')
+        if self.GetPlotParam('set_h_max'):
+            self.xmax = self.GetPlotParam('h_max')
+        self.axes.set_xlim(self.xmin, self.xmax)
+
+        # One unit is drawn the same length along both axes, which is what
+        # makes e.g. an x-y or a ux-uy plot look like the real thing.
+        self.axes.set_aspect('equal' if self.GetPlotParam('equal_aspect') else 'auto',
+                             adjustable = 'datalim' if self.shares_both_axes() else 'box')
+
+        if self.settings_window is not None:
+            self.settings_window.UpdateSampling()
 
     def CbarTickFormatter(self):
         ''' A helper function that sets the cbar ticks & labels. This used to be
@@ -747,236 +579,271 @@ class PhasePanel:
 
 
 class PhaseSettings(Tk.Toplevel):
+    '''The settings window of a phase plot.
+
+    It is laid out in three groups: what to plot (the species and the
+    quantity on each axis), which particles go into the histogram, and how
+    the histogram is displayed. Typed values are applied on <Return>.'''
+
+    PAD = {'padx': 4, 'pady': 2}
+
     def __init__(self, parent):
         self.parent = parent
         Tk.Toplevel.__init__(self)
 
         self.wm_title('Phase Plot (%d,%d) Settings' % self.parent.FigWrap.pos)
-        self.parent = parent
-        frm = ttk.Frame(self)
+        frm = ttk.Frame(self, padding = 6)
         frm.pack(fill=Tk.BOTH, expand=True)
+        frm.columnconfigure(0, weight = 1)
         self.protocol('WM_DELETE_WINDOW', self.OnClosing)
         self.bind('<Return>', self.TxtEnter)
 
-        # Create the OptionMenu to chooses the Interpolation Type:
-        self.InterpolVar = Tk.StringVar(self)
-        self.InterpolVar.set(self.parent.GetPlotParam('interpolation')) # default value
-        self.InterpolVar.trace('w', self.InterpolChanged)
-
-        ttk.Label(frm, text="Interpolation Method:").grid(row=0, column = 2)
-        InterplChooser = ttk.OptionMenu(frm, self.InterpolVar, self.parent.GetPlotParam('interpolation'), *tuple(self.parent.InterpolationMethods))
-        InterplChooser.grid(row =0, column = 3, sticky = Tk.W + Tk.E)
-
-        # Create the OptionMenu to chooses the Chart Type:
+        # The chart type
+        top = ttk.Frame(frm)
+        top.grid(row = 0, column = 0, sticky = Tk.EW, **self.PAD)
+        ttk.Label(top, text="Chart type:").pack(side = Tk.LEFT)
         self.ctypevar = Tk.StringVar(self)
         self.ctypevar.set(self.parent.chartType) # default value
         self.ctypevar.trace('w', self.ctypeChanged)
+        ttk.OptionMenu(top, self.ctypevar, self.parent.chartType,
+                       *tuple(self.parent.ChartTypes)).pack(side = Tk.LEFT, padx = 4)
 
-        ttk.Label(frm, text="Choose Chart Type:").grid(row=0, column = 0)
-        cmapChooser = ttk.OptionMenu(frm, self.ctypevar, self.parent.chartType, *tuple(self.parent.ChartTypes))
-        cmapChooser.grid(row =0, column = 1, sticky = Tk.W + Tk.E)
+        self.BuildProjection(frm).grid(row = 1, column = 0, sticky = Tk.EW, **self.PAD)
+        self.BuildSelection(frm).grid(row = 2, column = 0, sticky = Tk.EW, **self.PAD)
+        self.BuildDisplay(frm).grid(row = 3, column = 0, sticky = Tk.EW, **self.PAD)
 
+        ttk.Label(frm, text = 'Press Enter to apply typed values.',
+                  foreground = 'gray40').grid(row = 4, column = 0, sticky = Tk.W, **self.PAD)
 
-        # the Radiobox Control to choose the particle
-        self.prtlList = ['ion', 'electron']
+        self.UpdateAxisDependentControls()
+        self.UpdateSampling()
+
+    ####
+    #
+    # Layout
+    #
+    ####
+
+    def BuildProjection(self, frm):
+        '''The species, and the quantity and number of bins along each axis.'''
+        box = ttk.LabelFrame(frm, text = 'Projection', padding = 6)
+
+        ttk.Label(box, text = 'Species:').grid(row = 0, column = 0, sticky = Tk.W, **self.PAD)
+        species = ttk.Frame(box)
+        species.grid(row = 0, column = 1, columnspan = 3, sticky = Tk.W)
         self.pvar = Tk.IntVar()
         self.pvar.set(self.parent.GetPlotParam('prtl_type'))
+        for i, name in enumerate(['ions', 'electrons']):
+            ttk.Radiobutton(species, text = name, variable = self.pvar, value = i,
+                            command = self.RadioPrtl).pack(side = Tk.LEFT, padx = (0, 8))
 
-        ttk.Label(frm, text='Particle:').grid(row = 1, sticky = Tk.W)
+        ttk.Label(box, text = 'Bins').grid(row = 1, column = 2, sticky = Tk.W, **self.PAD)
 
-        for i in range(len(self.prtlList)):
-            ttk.Radiobutton(frm,
-                text=self.prtlList[i],
-                variable=self.pvar,
-                command = self.RadioPrtl,
-                value=i).grid(row = 2+i, sticky =Tk.W)
+        choices = [phase_space.DISPLAY_NAMES[q] for q in self.AvailableQuantities()]
+        horiz, vert = self.parent.phase_axes()
 
-        # the Radiobox Control to choose the momentum dim
-        self.dimvar = Tk.IntVar()
-        self.dimvar.set(self.parent.GetPlotParam('mom_dim'))
+        self.HorizVar = Tk.StringVar(self, phase_space.DISPLAY_NAMES[horiz])
+        self.VertVar = Tk.StringVar(self, phase_space.DISPLAY_NAMES[vert])
+        self.xBins = Tk.StringVar(self, str(self.parent.GetPlotParam('xbins')))
+        self.pBins = Tk.StringVar(self, str(self.parent.GetPlotParam('pbins')))
 
-        self.dimLabel = ttk.Label(frm, text=self.DimLabelText())
-        self.dimLabel.grid(row = 1, column = 1, sticky = Tk.W)
+        for row, (label, var, bins) in enumerate([('Horizontal axis:', self.HorizVar, self.xBins),
+                                                  ('Vertical axis:', self.VertVar, self.pBins)], start = 2):
+            ttk.Label(box, text = label).grid(row = row, column = 0, sticky = Tk.W, **self.PAD)
+            chooser = ttk.Combobox(box, textvariable = var, values = choices,
+                                   state = 'readonly', width = 12)
+            chooser.grid(row = row, column = 1, sticky = Tk.W, **self.PAD)
+            chooser.bind('<<ComboboxSelected>>', self.AxesChanged)
+            ttk.Entry(box, textvariable = bins, width = 6).grid(row = row, column = 2, sticky = Tk.W, **self.PAD)
 
-        self.dimButtons = []
-        for i, name in enumerate(self.DimNames()):
-            button = ttk.Radiobutton(frm,
-                text=name,
-                variable=self.dimvar,
-                command = self.RadioDim,
-                value=i)
-            button.grid(row = 2+i, column = 1, sticky = Tk.W)
-            self.dimButtons.append(button)
+        ttk.Button(box, text = 'Swap axes ⇅', command = self.SwapAxes).grid(
+            row = 2, column = 3, rowspan = 2, sticky = Tk.NS, **self.PAD)
+        return box
 
-
-        # Control whether or not Cbar is shown
-        self.CbarVar = Tk.IntVar()
-        self.CbarVar.set(self.parent.GetPlotParam('show_cbar'))
-        cb = ttk.Checkbutton(frm, text = "Show Color bar",
-                        variable = self.CbarVar,
-                        command = self.CbarHandler)
-        cb.grid(row = 6, sticky = Tk.W)
-
-        # show shock
-        self.ShockVar = Tk.IntVar()
-        self.ShockVar.set(self.parent.GetPlotParam('show_shock'))
-        cb = ttk.Checkbutton(frm, text = "Show Shock",
-                        variable = self.ShockVar,
-                        command = self.ShockVarHandler)
-        cb.grid(row = 6, column = 1, sticky = Tk.W)
-        # Use full div cmap
-        self.SymVar = Tk.IntVar()
-        self.SymVar.set(self.parent.GetPlotParam('symmetric'))
-        cb = ttk.Checkbutton(frm, text = "Symmetric about zero",
-                        variable = self.SymVar,
-                        command = self.SymmetricHandler)
-        cb.grid(row = 8, column = 1, sticky = Tk.W)
-
-
-        # Control if the plot is weightedd
-        self.WeightVar = Tk.IntVar()
-        self.WeightVar.set(self.parent.GetPlotParam('weighted'))
-        cb = ttk.Checkbutton(frm, text = "Weight by charge",
-                        variable = self.WeightVar,
-                        command = lambda:
-                        self.parent.SetPlotParam('weighted', self.WeightVar.get()))
-        cb.grid(row = 7, sticky = Tk.W)
-
-        # Show energy integration region
-        #self.IntRegVar = Tk.IntVar()
-        #self.IntRegVar.set(self.parent.GetPlotParam('show_int_region'))
-        cb = ttk.Checkbutton(frm, text = "Show Energy Region",
-                        variable = self.parent.IntRegVar)#,
-        #               command = self.ShowIntRegionHandler)
-        cb.grid(row = 7, column = 1, sticky = Tk.W)
-
-        # control mask
-        self.MaskVar = Tk.IntVar()
-        self.MaskVar.set(self.parent.GetPlotParam('masked'))
-        cb = ttk.Checkbutton(frm, text = "Mask Zeros",
-                        variable = self.MaskVar,
-                        command = lambda:
-                        self.parent.SetPlotParam('masked', self.MaskVar.get()))
-        cb.grid(row = 8, sticky = Tk.W)
-
-        self.TrueVar = Tk.IntVar()
-        self.TrueVar.set(1)
-        self.pBins = Tk.StringVar()
-        self.pBins.set(str(self.parent.GetPlotParam('pbins')))
-        ttk.Label(frm, text ='# of pbins').grid(row = 9, column = 0, sticky = Tk.W)
-        ttk.Entry(frm, textvariable=self.pBins, width=7).grid(row = 9, column = 1)
-
-        self.xBins = Tk.StringVar()
-        self.xBins.set(str(self.parent.GetPlotParam('xbins')))
-        ttk.Label(frm, text ='# of xbins').grid(row = 10, column = 0, sticky = Tk.W)
-        ttk.Entry(frm, textvariable=self.xBins, width=7).grid(row = 10, column = 1)
-
-        plot_axes.add_axis_buttons(frm, self, self.parent, row=11, column=0, columnspan=3, two_d=False,
-                                   on_change=self.RefreshDimLabels)
+    def BuildSelection(self, frm):
+        '''Which particles go into the histogram.'''
+        box = ttk.LabelFrame(frm, text = 'Particles', padding = 6)
 
         self.FilterVPVar = Tk.IntVar()
         self.FilterVPVar.set(self.parent.GetPlotParam('filter_by_viewport'))
-        cb = ttk.Checkbutton(frm, text = "Restrict to viewport",
+        ttk.Checkbutton(box, text = 'Only the particles in the zoomed 2D view',
                         variable = self.FilterVPVar,
-                        command = lambda:
-                        self.parent.SetPlotParam('filter_by_viewport', self.FilterVPVar.get()))
-        cb.grid(row = 9, column = 2, sticky = Tk.W)
+                        command = self.FilterVPHandler).grid(row = 0, column = 0, columnspan = 4, sticky = Tk.W, **self.PAD)
+        self.SamplingLabel = ttk.Label(box, foreground = 'gray30', wraplength = 380, justify = Tk.LEFT)
+        self.SamplingLabel.grid(row = 1, column = 0, columnspan = 4, sticky = Tk.W, padx = (24, 4))
 
+        self.WeightVar = Tk.IntVar()
+        self.WeightVar.set(self.parent.GetPlotParam('weighted'))
+        ttk.Checkbutton(box, text = 'Weight by charge', variable = self.WeightVar,
+                        command = lambda: self.parent.SetPlotParam('weighted', self.WeightVar.get())
+                        ).grid(row = 2, column = 0, columnspan = 4, sticky = Tk.W, **self.PAD)
 
-#        ttk.Label(frm, text = 'If the zero values are not masked they are set to z_min/2').grid(row =9, columnspan =2)
-    # Define functions for the events
-        # Now the field lim
-        self.setVminVar = Tk.IntVar()
-        self.setVminVar.set(self.parent.GetPlotParam('set_v_min'))
-        self.setVminVar.trace('w', self.setVminChanged)
+        self.setEminVar, self.Emin = self.LimitRow(box, 3, 0, 'Min energy (m_e c²)', 'set_E_min', 'E_min')
+        self.setEmaxVar, self.Emax = self.LimitRow(box, 3, 2, 'Max energy (m_e c²)', 'set_E_max', 'E_max')
+        return box
 
-        self.setVmaxVar = Tk.IntVar()
-        self.setVmaxVar.set(self.parent.GetPlotParam('set_v_max'))
-        self.setVmaxVar.trace('w', self.setVmaxChanged)
+    def BuildDisplay(self, frm):
+        '''How the histogram is shown.'''
+        box = ttk.LabelFrame(frm, text = 'Display', padding = 6)
 
+        self.setHminVar, self.Hmin = self.LimitRow(box, 0, 0, 'Horizontal min', 'set_h_min', 'h_min')
+        self.setHmaxVar, self.Hmax = self.LimitRow(box, 0, 2, 'Horizontal max', 'set_h_max', 'h_max')
+        self.setPminVar, self.Pmin = self.LimitRow(box, 1, 0, 'Vertical min', 'set_p_min', 'p_min')
+        self.setPmaxVar, self.Pmax = self.LimitRow(box, 1, 2, 'Vertical max', 'set_p_max', 'p_max')
 
+        self.SymVar = Tk.IntVar()
+        self.SymVar.set(self.parent.GetPlotParam('symmetric'))
+        ttk.Checkbutton(box, text = 'Vertical symmetric about zero', variable = self.SymVar,
+                        command = self.SymmetricHandler).grid(row = 2, column = 0, columnspan = 2, sticky = Tk.W, **self.PAD)
 
-        self.Vmin = Tk.StringVar()
-        self.Vmin.set(str(self.parent.GetPlotParam('v_min')))
+        self.AspectVar = Tk.IntVar()
+        self.AspectVar.set(self.parent.GetPlotParam('equal_aspect'))
+        ttk.Checkbutton(box, text = 'Equal aspect ratio', variable = self.AspectVar,
+                        command = lambda: self.SetToggle('equal_aspect', self.AspectVar)
+                        ).grid(row = 2, column = 2, columnspan = 2, sticky = Tk.W, **self.PAD)
 
-        self.Vmax = Tk.StringVar()
-        self.Vmax.set(str(self.parent.GetPlotParam('v_max')))
+        self.setVminVar, self.Vmin = self.LimitRow(box, 3, 0, 'log f min', 'set_v_min', 'v_min')
+        self.setVmaxVar, self.Vmax = self.LimitRow(box, 3, 2, 'log f max', 'set_v_max', 'v_max')
 
+        self.MaskVar = Tk.IntVar()
+        self.MaskVar.set(self.parent.GetPlotParam('masked'))
+        ttk.Checkbutton(box, text = 'Mask empty bins', variable = self.MaskVar,
+                        command = lambda: self.parent.SetPlotParam('masked', self.MaskVar.get())
+                        ).grid(row = 4, column = 0, columnspan = 2, sticky = Tk.W, **self.PAD)
 
-        cb = ttk.Checkbutton(frm, text ='Set log(f) min',
-                        variable = self.setVminVar)
-        cb.grid(row = 3, column = 2, sticky = Tk.W)
-        self.VminEnter = ttk.Entry(frm, textvariable=self.Vmin, width=7)
-        self.VminEnter.grid(row = 3, column = 3)
+        self.CbarVar = Tk.IntVar()
+        self.CbarVar.set(self.parent.GetPlotParam('show_cbar'))
+        ttk.Checkbutton(box, text = 'Show color bar', variable = self.CbarVar,
+                        command = self.CbarHandler).grid(row = 4, column = 2, columnspan = 2, sticky = Tk.W, **self.PAD)
 
-        cb = ttk.Checkbutton(frm, text ='Set log(f) max',
-                        variable = self.setVmaxVar)
-        cb.grid(row = 4, column = 2, sticky = Tk.W)
+        interp = ttk.Frame(box)
+        interp.grid(row = 5, column = 0, columnspan = 4, sticky = Tk.W, **self.PAD)
+        ttk.Label(interp, text = 'Interpolation:').pack(side = Tk.LEFT)
+        self.InterpolVar = Tk.StringVar(self)
+        self.InterpolVar.set(self.parent.GetPlotParam('interpolation')) # default value
+        self.InterpolVar.trace('w', self.InterpolChanged)
+        ttk.OptionMenu(interp, self.InterpolVar, self.parent.GetPlotParam('interpolation'),
+                       *tuple(self.parent.InterpolationMethods)).pack(side = Tk.LEFT, padx = 4)
 
-        self.VmaxEnter = ttk.Entry(frm, textvariable=self.Vmax, width=7)
-        self.VmaxEnter.grid(row = 4, column = 3)
+        # These mark positions in x, so they only apply when x is plotted.
+        self.ShockVar = Tk.IntVar()
+        self.ShockVar.set(self.parent.GetPlotParam('show_shock'))
+        self.ShockButton = ttk.Checkbutton(box, text = 'Show shock', variable = self.ShockVar,
+                                           command = self.ShockVarHandler)
+        self.ShockButton.grid(row = 6, column = 0, columnspan = 2, sticky = Tk.W, **self.PAD)
 
-        # Now the y lim
-        self.setPminVar = Tk.IntVar()
-        self.setPminVar.set(self.parent.GetPlotParam('set_p_min'))
-        self.setPminVar.trace('w', self.setPminChanged)
+        self.IntRegButton = ttk.Checkbutton(box, text = 'Show spectra energy region',
+                                            variable = self.parent.IntRegVar)
+        self.IntRegButton.grid(row = 6, column = 2, columnspan = 2, sticky = Tk.W, **self.PAD)
+        return box
 
-        self.setPmaxVar = Tk.IntVar()
-        self.setPmaxVar.set(self.parent.GetPlotParam('set_p_max'))
-        self.setPmaxVar.trace('w', self.setPmaxChanged)
+    def LimitRow(self, box, row, column, text, set_param, value_param):
+        '''A checkbox that turns a limit on, next to the entry that sets it.'''
+        set_var = Tk.IntVar()
+        set_var.set(self.parent.GetPlotParam(set_param))
+        set_var.trace('w', lambda *args: self.SetToggle(set_param, set_var))
+        value_var = Tk.StringVar(self, str(self.parent.GetPlotParam(value_param)))
+        ttk.Checkbutton(box, text = text, variable = set_var).grid(row = row, column = column, sticky = Tk.W, **self.PAD)
+        ttk.Entry(box, textvariable = value_var, width = 7).grid(row = row, column = column + 1, sticky = Tk.W, **self.PAD)
+        return set_var, value_var
 
+    ####
+    #
+    # Projection
+    #
+    ####
 
+    def AvailableQuantities(self):
+        '''The quantities that can be plotted: every momentum quantity, and the
+        positions the particle data holds.'''
+        prtl_type = self.parent.GetPlotParam('prtl_type')
+        keys = plot_axes.available_position_keys(self.parent, prtl_type, phase_space.SPATIAL)
+        present = {axis for axis in phase_space.SPATIAL
+                   if plot_axes.PRTL_POS_KEYS[prtl_type][axis] in keys}
+        if not present:
+            # The file could not be checked, so offer them all.
+            present = set(phase_space.SPATIAL)
+        # Always offer whatever is already chosen.
+        present |= {q for q in self.parent.phase_axes() if phase_space.is_spatial(q)}
+        return [q for q in phase_space.QUANTITIES if q in present or not phase_space.is_spatial(q)]
 
-        self.Pmin = Tk.StringVar()
-        self.Pmin.set(str(self.parent.GetPlotParam('p_min')))
+    def SelectedAxes(self):
+        by_name = {name: q for q, name in phase_space.DISPLAY_NAMES.items()}
+        return by_name[self.HorizVar.get()], by_name[self.VertVar.get()]
 
-        self.Pmax = Tk.StringVar()
-        self.Pmax.set(str(self.parent.GetPlotParam('p_max')))
+    def AxesChanged(self, *args):
+        horiz, vert = self.SelectedAxes()
+        if (horiz, vert) == self.parent.phase_axes():
+            return
+        # A zoom into the old quantities means nothing for the new ones, so
+        # the panel starts again from its full view.
+        try:
+            i, j = self.parent.FigWrap.pos
+            self.parent.parent.prev_ctype_list[i][j] = None
+        except (AttributeError, IndexError):
+            pass
+        self.CarryLimits(self.parent.phase_axes(), (horiz, vert))
+        # Both are set so a view saved from here no longer needs the legacy params.
+        self.parent.SetPlotParam('phase_x', horiz, update_plot = False)
+        self.parent.SetPlotParam('phase_y', vert, update_plot = False)
+        # Only an x axis follows the shock when the x limits are shock-relative.
+        self.parent.SetPlotParam('spatial_x', horiz == 'x', update_plot = False)
+        self.parent.SetPlotParam('spatial_y', phase_space.is_spatial(vert), update_plot = False)
+        self.UpdateAxisDependentControls(horiz)
+        self.parent.SetPlotParam('phase_y', vert, NeedsRedraw = True)
 
+    def CarryLimits(self, old, new):
+        '''Keep the limits of an axis with its quantity: a swap swaps them, and
+        an axis given a new quantity has its limits turned off.'''
+        rows = {'h': (self.setHminVar, self.Hmin, self.setHmaxVar, self.Hmax),
+                'p': (self.setPminVar, self.Pmin, self.setPmaxVar, self.Pmax)}
+        names = ('set_{}_min', '{}_min', 'set_{}_max', '{}_max')
+        saved = {axis: [self.parent.GetPlotParam(n.format(axis)) for n in names] for axis in 'hp'}
+        if new == old[::-1] and new != old:
+            target = {'h': saved['p'], 'p': saved['h']}
+        else:
+            target = {}
+            for axis, before, after in zip('hp', old, new):
+                values = list(saved[axis])
+                if before != after:
+                    values[0] = values[2] = False
+                target[axis] = values
+        for axis, values in target.items():
+            for name, value, var in zip(names, values, rows[axis]):
+                self.parent.SetPlotParam(name.format(axis), value, update_plot = False)
+                var.set(value if name.startswith('set') else str(value))
 
-        cb = ttk.Checkbutton(frm, text ='Set y_axis min',
-                        variable = self.setPminVar)
-        cb.grid(row = 5, column = 2, sticky = Tk.W)
-        self.PminEnter = ttk.Entry(frm, textvariable=self.Pmin, width=7)
-        self.PminEnter.grid(row = 5, column = 3)
+    def SwapAxes(self):
+        horiz, vert = self.HorizVar.get(), self.VertVar.get()
+        self.HorizVar.set(vert)
+        self.VertVar.set(horiz)
+        self.AxesChanged()
 
-        cb = ttk.Checkbutton(frm, text ='Set y_axis max',
-                        variable = self.setPmaxVar)
-        cb.grid(row = 6, column = 2, sticky = Tk.W)
+    def UpdateAxisDependentControls(self, horiz = None):
+        '''Grey out the markers of x positions unless x runs horizontally.'''
+        if horiz is None:
+            horiz = self.parent.phase_axes()[0]
+        state = ['!disabled'] if horiz == 'x' else ['disabled']
+        self.ShockButton.state(state)
+        self.IntRegButton.state(state)
 
-        self.PmaxEnter = ttk.Entry(frm, textvariable=self.Pmax, width=7)
-        self.PmaxEnter.grid(row = 6, column = 3)
+    def UpdateSampling(self):
+        '''Say which particles the histogram was made from.'''
+        try:
+            self.SamplingLabel.config(text = self.parent.sampling_description())
+        except Tk.TclError:
+            # The window is already gone.
+            pass
 
-        # Now the E lim
-        self.setEminVar = Tk.IntVar()
-        self.setEminVar.set(self.parent.GetPlotParam('set_E_min'))
-        self.setEminVar.trace('w', self.setEminChanged)
+    ####
+    #
+    # Handlers
+    #
+    ####
 
-        self.setEmaxVar = Tk.IntVar()
-        self.setEmaxVar.set(self.parent.GetPlotParam('set_E_max'))
-        self.setEmaxVar.trace('w', self.setEmaxChanged)
-
-
-        self.Emin = Tk.StringVar()
-        self.Emin.set(str(self.parent.GetPlotParam('E_min')))
-
-        self.Emax = Tk.StringVar()
-        self.Emax.set(str(self.parent.GetPlotParam('E_max')))
-
-
-        cb = ttk.Checkbutton(frm, text ='Set E_min (m_e c^2)',
-                        variable = self.setEminVar)
-        cb.grid(row = 7, column = 2, sticky = Tk.W)
-        self.EminEnter = ttk.Entry(frm, textvariable=self.Emin, width=7)
-        self.EminEnter.grid(row = 7, column = 3)
-
-        cb = ttk.Checkbutton(frm, text ='Set E_max (m_e c^2)',
-                        variable = self.setEmaxVar)
-        cb.grid(row = 8, column = 2, sticky = Tk.W)
-
-        self.EmaxEnter = ttk.Entry(frm, textvariable=self.Emax, width=7)
-        self.EmaxEnter.grid(row = 8, column = 3)
-
+    def FilterVPHandler(self):
+        self.parent.SetPlotParam('filter_by_viewport', self.FilterVPVar.get())
+        self.UpdateSampling()
 
     def ShockVarHandler(self, *args):
         if self.parent.GetPlotParam('show_shock')== self.ShockVar.get():
@@ -1012,36 +879,10 @@ class PhaseSettings(Tk.Toplevel):
         if self.pvar.get() == self.parent.GetPlotParam('prtl_type'):
             pass
         else:
-
             self.parent.SetPlotParam('prtl_type', self.pvar.get(), update_plot =  False)
             self.parent.UpdateLabelsandColors()
             self.parent.axes.set_ylabel(self.parent.y_label, labelpad = self.parent.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.parent.MainParamDict['AxLabelSize'])
-            #self.parent.lineleft.set_color(self.parent.energy_color)
-            #self.parent.lineright.set_color(self.parent.energy_color)
             self.parent.SetPlotParam('prtl_type', self.pvar.get())
-
-    def DimNames(self):
-        '''The momentum choices, named after the axis they are plotted against.'''
-        axis = plot_axes.plot_axis_name(self.parent)
-        return [axis + '-px', axis + '-py', axis + '-pz']
-
-    def DimLabelText(self):
-        return plot_axes.plot_axis_name(self.parent) + '-Momentum:'
-
-    def RefreshDimLabels(self):
-        '''Rename the momentum controls after a change to the spatial axis.'''
-        self.dimLabel.config(text=self.DimLabelText())
-        for button, name in zip(self.dimButtons, self.DimNames()):
-            button.config(text=name)
-
-    def RadioDim(self):
-        if self.dimvar.get() == self.parent.GetPlotParam('mom_dim'):
-            pass
-        else:
-            self.parent.SetPlotParam('mom_dim', self.dimvar.get(), update_plot = False)
-            self.parent.UpdateLabelsandColors()
-            self.parent.axes.set_ylabel(self.parent.y_label, labelpad = self.parent.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.parent.MainParamDict['AxLabelSize'])
-            self.parent.SetPlotParam('mom_dim', self.dimvar.get())
 
     def SymmetricHandler(self, *args):
         if self.parent.GetPlotParam('symmetric') == self.SymVar.get():
@@ -1049,51 +890,18 @@ class PhaseSettings(Tk.Toplevel):
         else:
             self.parent.SetPlotParam('symmetric', self.SymVar.get(), update_plot = True)
 
-    def setVminChanged(self, *args):
-        if self.setVminVar.get() == self.parent.GetPlotParam('set_v_min'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_v_min', self.setVminVar.get())
-
-    def setVmaxChanged(self, *args):
-        if self.setVmaxVar.get() == self.parent.GetPlotParam('set_v_max'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_v_max', self.setVmaxVar.get())
-
-    def setPminChanged(self, *args):
-        if self.setPminVar.get() == self.parent.GetPlotParam('set_p_min'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_p_min', self.setPminVar.get())
-
-    def setPmaxChanged(self, *args):
-        if self.setPmaxVar.get() == self.parent.GetPlotParam('set_p_max'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_p_max', self.setPmaxVar.get())
-
-    def setEminChanged(self, *args):
-        if self.setEminVar.get() == self.parent.GetPlotParam('set_E_min'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_E_min', self.setEminVar.get())
-
-    def setEmaxChanged(self, *args):
-        if self.setEmaxVar.get() == self.parent.GetPlotParam('set_E_max'):
-            pass
-        else:
-            self.parent.SetPlotParam('set_E_max', self.setEmaxVar.get())
-
+    def SetToggle(self, param, var):
+        if var.get() != self.parent.GetPlotParam(param):
+            self.parent.SetPlotParam(param, var.get())
 
     def TxtEnter(self, e):
         self.FieldsCallback()
 
     def FieldsCallback(self):
         #### First set the Float Values
-        tkvarLimList = [self.Vmin, self.Vmax, self.Pmin, self.Pmax, self.Emin, self.Emax]
-        plot_param_List = ['v_min', 'v_max', 'p_min', 'p_max', 'E_min', 'E_max']
-        tkvarSetList = [self.setVminVar, self.setVmaxVar, self.setPminVar, self.setPmaxVar, self.setEminVar, self.setEmaxVar]
+        tkvarLimList = [self.Vmin, self.Vmax, self.Hmin, self.Hmax, self.Pmin, self.Pmax, self.Emin, self.Emax]
+        plot_param_List = ['v_min', 'v_max', 'h_min', 'h_max', 'p_min', 'p_max', 'E_min', 'E_max']
+        tkvarSetList = [self.setVminVar, self.setVmaxVar, self.setHminVar, self.setHmaxVar, self.setPminVar, self.setPmaxVar, self.setEminVar, self.setEmaxVar]
         to_reload = False
         for j in range(len(tkvarLimList)):
             try:
@@ -1110,17 +918,18 @@ class PhaseSettings(Tk.Toplevel):
         intParamList = ['pbins', 'xbins']
         for j in range(len(intVarList)):
             try:
-            #make sure the user types in a float
-                intVarList[j].set(str(int(float(intVarList[j].get()))))
-                if int(float(intVarList[j].get())) - int(self.parent.GetPlotParam(intParamList[j])) != 0:
-
-                    self.parent.SetPlotParam(intParamList[j], int(float(intVarList[j].get())), update_plot = False)
+            #make sure the user types in a positive integer
+                n_bins = int(float(intVarList[j].get()))
+                if n_bins < 1:
+                    raise ValueError
+                intVarList[j].set(str(n_bins))
+                if n_bins != int(self.parent.GetPlotParam(intParamList[j])):
+                    self.parent.SetPlotParam(intParamList[j], n_bins, update_plot = False)
                     to_reload += True
 
             except ValueError:
-            #    print hi
                 #if they type in random stuff, just set it ot the param value
-                intVarList[j].set(str(self.parent.GetPlotParam(intVarList[j])))
+                intVarList[j].set(str(self.parent.GetPlotParam(intParamList[j])))
 
 
         if to_reload:

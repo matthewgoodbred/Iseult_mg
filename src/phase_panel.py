@@ -3,13 +3,13 @@ import matplotlib, sys
 sys.path.append('../')
 
 import numpy as np
-import numpy.ma as ma
 import new_cmaps
-from new_cnorms import PowerNormWithNeg
-from Numba2DHist import Fast2DHist, Fast2DWeightedHist, vecLog10Norm
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
+import phase_space
+
+from plot_axes import SLICE_PLANE_AXES
 
 class PhasePanel:
     # A dictionary of all of the parameters for this plot with the default parameters
@@ -38,29 +38,23 @@ class PhasePanel:
                        'E_max': 200.0,
                        'set_p_min': False,
                        'set_p_max': False,
+                       'h_min': 0.0,
+                       'h_max': 1.0,
+                       'set_h_min': False,
+                       'set_h_max': False,
+                       'equal_aspect': False,
                        'spatial_x': True,
                        'symmetric': False,
                        'spatial_y': False,
                        'interpolation': 'nearest',
                        'filter_by_viewport': True,
-                       'face_color': 'gainsboro'}
+                       'face_color': 'gainsboro',
+                       'plot_axis': 0,
+                       # The quantities on the horizontal and vertical axes,
+                       # see phase_space.phase_axes.
+                       'phase_x': None,
+                       'phase_y': None}
 
-
-    prtl_opts = ['proton_p', 'electron_p']
-    direction_opts = ['x-x', 'y-x', 'z-x']
-    # Old labels:
-    #ylabel_list =[
-    #              [[r'$P_{px}\ [m_i c]$', r'$P_{py}\ [m_i c]$',r'$P_{pz}\ [m_i c]$'],
-    #              [r'$P_{ex}\ [m_e c]$', r'$P_{ey}\ [m_e c]$',r'$P_{ez}\ [m_e c]$']],
-    #              [[r'$P\prime_{px}\ [m_i c]$', r'$P\prime_{py}\ [m_i c]$',r'$P\prime_{pz}\ [m_i c]$'],
-    #              [r'$P\prime_{ex}\ [m_e c]$', r'$P\prime_{ey}\ [m_e c]$',r'$P\prime_{ez}\ [m_e c]$']]
-    #             ]
-    ylabel_list =[
-                 [[r'$\gamma_i\beta_{x,i}$',r'$\gamma_i\beta_{y,i}$',r'$\gamma_i\beta_{z,i}$'],
-                  [r'$\gamma_e\beta_{x,e}$',r'$\gamma_e\beta_{y,e}$',r'$\gamma_e\beta_{z,e}$']],
-                 [[r'$\gamma\prime_i\beta\prime_{x,i}$',r'$\gamma\prime_i\beta\prime_{y,i}$',r'$\gamma\prime_i\beta\prime_{z,i}$'],
-                  [r'$\gamma\prime_e\beta\prime_{x,e}$',r'$\gamma\prime_e\beta\prime_{y,e}$',r'$\gamma\prime_e\beta\prime_{z,e}$']]
-                 ]
 
     gradient =  np.linspace(0, 1, 256)# A way to make the colorbar display better
     gradient = np.vstack((gradient, gradient))
@@ -103,13 +97,20 @@ class PhasePanel:
 
         for line in self.IntRegionLines:
             line.set_color(self.energy_color)
-        #set the xlabels
-        if self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8:
-            self.x_label = r'$x\prime\ [c/\omega_{\rm pe}]$'
-        else:
-            self.x_label = r'$x\ [c/\omega_{\rm pe}]$'
-        #set the ylabel
-        self.y_label  = self.ylabel_list[self.parent.MainParamDict['DoLorentzBoost']][self.GetPlotParam('prtl_type')][self.GetPlotParam('mom_dim')]
+        boosted = self.boost() is not None
+        horiz, vert = self.shown_axes()
+        self.x_label = phase_space.axis_label(horiz, self.GetPlotParam('prtl_type'), boosted)
+        self.y_label = phase_space.axis_label(vert, self.GetPlotParam('prtl_type'), boosted)
+
+    def shown_axes(self):
+        '''The (horizontal, vertical) quantities plotted.'''
+        return getattr(self, 'horiz', None) or phase_space.phase_axes(self.GetPlotParam)[0], \
+               getattr(self, 'vert', None) or phase_space.phase_axes(self.GetPlotParam)[1]
+
+    def boost(self):
+        if not self.parent.MainParamDict['DoLorentzBoost']:
+            return None
+        return phase_space.boost_factors(self.parent.MainParamDict['GammaBoost'])
 
     def get_active_viewport_headless(self, output):
         if not hasattr(self.parent, 'SubPlotList') or self.parent.SubPlotList is None:
@@ -190,312 +191,79 @@ class PhasePanel:
                     if (xlim_max - xlim_min) >= 0.98 * full_x_span and (ylim_max - ylim_min) >= 0.98 * full_y_span:
                         self.viewport = None
 
-        if self.parent.MainParamDict['DoLorentzBoost'] and np.abs(self.parent.MainParamDict['GammaBoost'])>1E-8:
-            # Gotta boost it
-            self.c_omp = getattr(output,'c_omp')
-            self.istep = getattr(output,'istep')
-            self.weights = None
-            self.x_values = None
-            self.y_values = None
+        prtl_type = self.GetPlotParam('prtl_type')
+        self.c_omp = getattr(output, 'c_omp')
+        self.istep = getattr(output, 'istep')
+        n_prtls = len(getattr(output, 'xi' if prtl_type == 0 else 'xe'))
 
-            # x_min & x_max before boostin'
-            self.xmin = 0
-            self.xmax = getattr(output,'bx').shape[2]/self.c_omp*self.istep
-            self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
-
-            # First calculate beta and gamma
-            if self.parent.MainParamDict['GammaBoost'] >=1:
-                self.GammaBoost = self.parent.MainParamDict['GammaBoost']
-                self.betaBoost = np.sqrt(1-1/self.parent.MainParamDict['GammaBoost']**2)
-            elif self.parent.MainParamDict['GammaBoost'] >-1:
-                self.betaBoost = self.parent.MainParamDict['GammaBoost']
-                self.GammaBoost = np.sqrt(1-self.betaBoost**2)**(-1)
-
-            else:
-                self.GammaBoost = -self.parent.MainParamDict['GammaBoost']
-                self.betaBoost = -np.sqrt(1-1/self.parent.MainParamDict['GammaBoost']**2)
-
-
-
-            # Now load the data. We require all 3 dimensions to determine
-            # the velocity and LF in the boosted frame.
-            if self.GetPlotParam('prtl_type') == 0:
-                # first load everything downstream frame
-                self.x_values = getattr(output,'xi')/self.c_omp
-
-                u = getattr(output,'ui')
-                v = getattr(output,'vi')
-                w = getattr(output,'wi')
-                if self.GetPlotParam('weighted'):
-                    self.weights = getattr(output,'chi')
-
-            if self.GetPlotParam('prtl_type') == 1: #electons
-                self.x_values = getattr(output,'xe')/self.c_omp
-                u = getattr(output,'ue')
-                v = getattr(output,'ve')
-                w = getattr(output,'we')
-
-                if self.GetPlotParam('weighted'):
-                    self.weights = getattr(output,'che')
-
-
-            # Now calculate gamma of the particles in downstream restframe
-            gamma_ds = np.sqrt(u**2+v**2+w**2+1)
-
-
-
-            # calculate the velocities from the momenta
-            vx = u/gamma_ds
-            vy = v/gamma_ds
-            vz = w/gamma_ds
-
-            # Now calculate the velocities in the boosted frames
-            tmp_helper = 1-vx*self.betaBoost
-            vx_prime = (vx-self.betaBoost)/tmp_helper
-            vy_prime = vy/self.GammaBoost/tmp_helper
-            vz_prime = vz/self.GammaBoost/tmp_helper
-
-            # Now calculate the LF in the boosted frames using rapidity
-            # Initial rapidity
-            rap_prtl = np.arccosh(gamma_ds)
-            rap_boost = np.arccosh(self.GammaBoost)
-
-            gamma_prime = gamma_ds*self.GammaBoost-np.sign(u)*np.sign(self.betaBoost)*np.sinh(rap_prtl)*np.sinh(rap_boost)/np.sqrt(1+(v/u)**2+(w/u)**2)
-
-            if self.GetPlotParam('mom_dim') == 0:
-                self.y_values  = vx_prime*gamma_prime
-            if self.GetPlotParam('mom_dim') == 1:
-                self.y_values  = vy_prime*gamma_prime
-            if self.GetPlotParam('mom_dim') == 2:
-                self.y_values  = vz_prime*gamma_prime
-
-            # Some of the values are becoming NaN.
-            nan_ind = np.isnan(self.y_values)
-
-            inRange = np.ones(len(self.y_values), dtype=bool)
-
-            if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
-                # We need to calculate the total energy in units m_e c^2
-                if self.GetPlotParam('prtl_type')==0:
-                    energy = gamma_ds*getattr(output,'mi')/getattr(output,'me')
-                else:
-                    energy = np.copy(gamma_ds)
-
-                # Now find the particles that fall in our range
-                if self.GetPlotParam('set_E_min'):
-                    inRange &= energy >= self.GetPlotParam('E_min')
-                if self.GetPlotParam('set_E_max'):
-                    inRange &= energy <= self.GetPlotParam('E_max')
-
-            # Filter by viewport if active
-            if self.viewport is not None:
-                xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
-                xlim_min, xlim_max = min(xlim_0, xlim_1), max(xlim_0, xlim_1)
-                ylim_min, ylim_max = min(ylim_0, ylim_1), max(ylim_0, ylim_1)
-
-                if plane in [0, 1]:
-                    inRange &= (self.x_values >= xlim_min) & (self.x_values <= xlim_max)
-                    self.xmin = xlim_min
-                    self.xmax = xlim_max
-
-                prtl_type = self.GetPlotParam('prtl_type')
-                if plane == 0: # x-y plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    if hasattr(output, y_key):
-                        try:
-                            y_coord = getattr(output, y_key) / self.c_omp
-                            inRange &= (y_coord >= ylim_min) & (y_coord <= ylim_max)
-                        except Exception:
-                            pass
-                elif plane == 1: # x-z plane
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    if hasattr(output, z_key):
-                        try:
-                            z_coord = getattr(output, z_key) / self.c_omp
-                            inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                        except Exception:
-                            pass
-                elif plane == 2: # y-z plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    if hasattr(output, y_key):
-                        try:
-                            y_coord = getattr(output, y_key) / self.c_omp
-                            inRange &= (y_coord >= xlim_min) & (y_coord <= xlim_max)
-                        except Exception:
-                            pass
-                    if hasattr(output, z_key):
-                        try:
-                            z_coord = getattr(output, z_key) / self.c_omp
-                            inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                        except Exception:
-                            pass
-
-            inRange &= np.logical_not(nan_ind)
-
-            # Calculate pmin and pmax after filtering!
-            self.pmin = 0.0 if len(self.y_values[inRange]) == 0 else min(self.y_values[inRange])
-            self.pmax = 0.0 if len(self.y_values[inRange]) == 0 else max(self.y_values[inRange])
-            self.pmax = self.pmax if (self.pmax != self.pmin) else self.pmin + 1
-
-            if self.GetPlotParam('weighted'):
-                self.hist2d = Fast2DWeightedHist(self.y_values[inRange], self.x_values[inRange], self.weights[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
-            else:
-                self.hist2d = Fast2DHist(self.y_values[inRange], self.x_values[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
-
+        def positions(axis):
+            key = {0: {'x': 'xi', 'y': 'yi', 'z': 'zi'},
+                   1: {'x': 'xe', 'y': 'ye', 'z': 'ze'}}[prtl_type][axis]
             try:
-                if self.GetPlotParam('masked'):
-                    zval = ma.masked_array(self.hist2d[0])
-                    zval[zval <= 0] = ma.masked
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
+                coord = np.asanyarray(getattr(output, key))
+            except Exception:
+                return None
+            if coord.ndim != 1 or coord.shape[0] != n_prtls:
+                return None
+            return coord / self.c_omp
+
+        quantities = phase_space.ParticleQuantities(lambda key: getattr(output, key),
+                                                    positions, prtl_type, self.boost())
+        horiz, vert = phase_space.phase_axes(self.GetPlotParam)
+        # A 1D or 2D run may not hold the chosen coordinate; show x instead.
+        self.horiz, self.vert = [q if quantities(q) is not None else 'x' for q in (horiz, vert)]
+        h_values = quantities(self.horiz)
+        v_values = quantities(self.vert)
+
+        in_range = np.isfinite(h_values) & np.isfinite(v_values)
+
+        if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
+            # The energy of each particle in units of m_e c^2
+            energy = quantities.lab_gamma()
+            if prtl_type == 0:
+                energy = energy*getattr(output, 'mi')/getattr(output, 'me')
+            if self.GetPlotParam('set_E_min'):
+                in_range &= energy >= self.GetPlotParam('E_min')
+            if self.GetPlotParam('set_E_max'):
+                in_range &= energy <= self.GetPlotParam('E_max')
+
+        # Keep only the particles inside the viewport of the 2D panel.
+        ranges = {}
+        if self.viewport is not None:
+            xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
+            h_axis, v_axis = SLICE_PLANE_AXES[plane]
+            for axis, low, high in ((h_axis, min(xlim_0, xlim_1), max(xlim_0, xlim_1)),
+                                    (v_axis, min(ylim_0, ylim_1), max(ylim_0, ylim_1))):
+                coord = quantities(axis)
+                if coord is None:
+                    continue
+                in_range &= (coord >= low) & (coord <= high)
+                ranges[axis] = (low, high)
+
+        field_shape = getattr(output, 'bx').shape
+
+        def axis_range(quantity, values, axis):
+            if phase_space.is_spatial(quantity):
+                if quantity in ranges:
+                    default = ranges[quantity]
                 else:
-                    zval = np.copy(self.hist2d[0])
-                    zval[zval==0] = 0.5
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval.min(), zval.max()]
-            except ValueError:
-                tmplist = [0.1, 1]
-            self.hist2d = zval, self.hist2d[1], self.hist2d[2], tmplist
-
-
-
-
-        else:
-            # Generate the X-axis values
-            self.c_omp = getattr(output,'c_omp')
-            self.istep = getattr(output,'istep')
-            self.weights = None
-            self.x_values = None
-            self.y_values = None
-
-            # Choose the particle type and px, py, or pz
-            if self.GetPlotParam('prtl_type') == 0: #protons
-                self.x_values = getattr(output,'xi')/self.c_omp
-                if self.GetPlotParam('weighted'):
-                    self.weights = getattr(output,'chi')
-                if self.GetPlotParam('mom_dim') == 0:
-                    self.y_values = getattr(output,'ui')
-                if self.GetPlotParam('mom_dim') == 1:
-                    self.y_values = getattr(output,'vi')
-                if self.GetPlotParam('mom_dim') == 2:
-                    self.y_values = getattr(output,'wi')
-
-            if self.GetPlotParam('prtl_type') == 1: #electons
-                self.energy_color = self.parent.electron_color
-                self.x_values = getattr(output,'xe')/self.c_omp
-                if self.GetPlotParam('weighted'):
-                    self.weights = getattr(output,'che')
-                if self.GetPlotParam('mom_dim') == 0:
-                    self.y_values = getattr(output,'ue')
-                if self.GetPlotParam('mom_dim') == 1:
-                    self.y_values = getattr(output,'ve')
-                if self.GetPlotParam('mom_dim') == 2:
-                    self.y_values = getattr(output,'we')
-
-            self.xmin = 0
-            self.xmax = getattr(output,'bx').shape[2]/self.c_omp*self.istep
-            self.xmax = self.xmax if (self.xmax != self.xmin) else self.xmin + 1
-
-            inRange = np.ones(len(self.y_values), dtype=bool)
-
-            if self.GetPlotParam('set_E_min') or self.GetPlotParam('set_E_max'):
-                # We need to calculate the total energy of each particle in
-                # units m_e c^2
-
-                # First load the data. We require all 3 dimensions of momentum
-                # to determine the energy in the downstream frame
-                if self.GetPlotParam('prtl_type') == 0:
-                    u = getattr(output,'ui')
-                    v = getattr(output,'vi')
-                    w = getattr(output,'wi')
-
-                if self.GetPlotParam('prtl_type') == 1: #electons
-                    u = getattr(output,'ue')
-                    v = getattr(output,'ve')
-                    w = getattr(output,'we')
-
-                # Now calculate LF of the particles in downstream restframe
-                energy = np.sqrt(u**2+v**2+w**2+1)
-                # If they are electrons this already the energy in units m_e c^2.
-                # Otherwise...
-                if self.GetPlotParam('prtl_type')==0:
-                    energy *= getattr(output,'mi')/getattr(output,'me')
-
-                # Now find the particles that fall in our range
-                if self.GetPlotParam('set_E_min'):
-                    inRange &= energy >= self.GetPlotParam('E_min')
-                if self.GetPlotParam('set_E_max'):
-                    inRange &= energy <= self.GetPlotParam('E_max')
-
-            # Filter by viewport if active
-            if self.viewport is not None:
-                xlim_0, xlim_1, ylim_0, ylim_1, plane = self.viewport
-                xlim_min, xlim_max = min(xlim_0, xlim_1), max(xlim_0, xlim_1)
-                ylim_min, ylim_max = min(ylim_0, ylim_1), max(ylim_0, ylim_1)
-
-                if plane in [0, 1]:
-                    inRange &= (self.x_values >= xlim_min) & (self.x_values <= xlim_max)
-                    self.xmin = xlim_min
-                    self.xmax = xlim_max
-
-                prtl_type = self.GetPlotParam('prtl_type')
-                if plane == 0: # x-y plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    if hasattr(output, y_key):
-                        try:
-                            y_coord = getattr(output, y_key) / self.c_omp
-                            inRange &= (y_coord >= ylim_min) & (y_coord <= ylim_max)
-                        except Exception:
-                            pass
-                elif plane == 1: # x-z plane
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    if hasattr(output, z_key):
-                        try:
-                            z_coord = getattr(output, z_key) / self.c_omp
-                            inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                        except Exception:
-                            pass
-                elif plane == 2: # y-z plane
-                    y_key = 'yi' if prtl_type == 0 else 'ye'
-                    z_key = 'zi' if prtl_type == 0 else 'ze'
-                    if hasattr(output, y_key):
-                        try:
-                            y_coord = getattr(output, y_key) / self.c_omp
-                            inRange &= (y_coord >= xlim_min) & (y_coord <= xlim_max)
-                        except Exception:
-                            pass
-                    if hasattr(output, z_key):
-                        try:
-                            z_coord = getattr(output, z_key) / self.c_omp
-                            inRange &= (z_coord >= ylim_min) & (z_coord <= ylim_max)
-                        except Exception:
-                            pass
-
-            # Calculate pmin and pmax after filtering!
-            self.pmin = 0.0 if len(self.y_values[inRange]) == 0 else min(self.y_values[inRange])
-            self.pmax = 0.0 if len(self.y_values[inRange]) == 0 else max(self.y_values[inRange])
-            self.pmax = self.pmax if (self.pmax != self.pmin) else self.pmin + 1
-
-            if self.GetPlotParam('weighted'):
-                self.hist2d = Fast2DWeightedHist(self.y_values[inRange], self.x_values[inRange], self.weights[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
+                    n_cells = field_shape[{'z': 0, 'y': 1, 'x': 2}[quantity]]
+                    high = n_cells/self.c_omp*self.istep
+                    default = (0.0, high if high != 0 else 1.0)
             else:
-                self.hist2d = Fast2DHist(self.y_values[inRange], self.x_values[inRange], self.pmin,self.pmax, self.GetPlotParam('pbins'), self.xmin,self.xmax, self.GetPlotParam('xbins')), [self.pmin, self.pmax], [self.xmin, self.xmax]
+                default = phase_space.data_range(values[in_range])
+            return phase_space.limited_range(default, self.GetPlotParam, axis)
 
-            try:
-                if self.GetPlotParam('masked'):
-                    zval = ma.masked_array(self.hist2d[0])
-                    zval[zval == 0] = ma.masked
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval[np.logical_not(zval.mask)].min(), zval.max()]
-                else:
-                    zval = np.copy(self.hist2d[0])
-                    zval[zval==0] = 0.5
-                    zval *= float(zval.max())**(-1)
-                    tmplist = [zval.min(), zval.max()]
-            except ValueError:
-                tmplist = [0.1,1]
-            self.hist2d = zval, self.hist2d[1], self.hist2d[2], tmplist
+        weights = None
+        if self.GetPlotParam('weighted'):
+            weights = getattr(output, phase_space.WEIGHT_KEYS[prtl_type])[in_range]
+
+        self.hist2d = phase_space.histogram(h_values[in_range], v_values[in_range],
+                                            axis_range(self.horiz, h_values, 'h'),
+                                            axis_range(self.vert, v_values, 'p'),
+                                            self.GetPlotParam('xbins'), self.GetPlotParam('pbins'),
+                                            weights = weights,
+                                            masked = self.GetPlotParam('masked'))
 
     def draw(self):
         # In order to speed up the plotting, we only recalculate everything
@@ -542,7 +310,7 @@ class PhasePanel:
 
         self.shock_line = self.axes.axvline(self.parent.shock_loc, linewidth = 1.5, linestyle = '--', color = self.parent.shock_color, path_effects=[PathEffects.Stroke(linewidth=2, foreground='k'),
                    PathEffects.Normal()])
-        if not self.GetPlotParam('show_shock'):
+        if not (self.GetPlotParam('show_shock') and self.shown_axes()[0] == 'x'):
             self.shock_line.set_visible(False)
 
 
@@ -649,7 +417,7 @@ class PhasePanel:
 
         self.axes.set_ylim(self.ymin, self.ymax)
 
-        if self.parent.MainParamDict['SetxLim'] and self.parent.MainParamDict['LinkSpatial'] == 1:
+        if self.shown_axes()[0] == 'x' and self.parent.MainParamDict['SetxLim'] and self.parent.MainParamDict['LinkSpatial'] == 1:
             if self.parent.MainParamDict['xLimsRelative']:
                 self.axes.set_xlim(self.parent.MainParamDict['xLeft'] + self.parent.shock_loc,
                                    self.parent.MainParamDict['xRight'] + self.parent.shock_loc)
@@ -658,6 +426,12 @@ class PhasePanel:
 
         else:
             self.axes.set_xlim(self.xmin,self.xmax)
+        if self.GetPlotParam('set_h_min'):
+            self.axes.set_xlim(left = self.GetPlotParam('h_min'))
+        if self.GetPlotParam('set_h_max'):
+            self.axes.set_xlim(right = self.GetPlotParam('h_max'))
+
+        self.axes.set_aspect('equal' if self.GetPlotParam('equal_aspect') else 'auto')
 
     def CbarTickFormatter(self):
         ''' A helper function that sets the cbar ticks & labels. This used to be

@@ -26,6 +26,7 @@ from total_energy_plots import TotEnergyPanel
 from moments import MomentsPanel
 from balance_panels import OhmsLawPanel, PressureBalancePanel
 import plot_axes
+import phase_space
 from view_state import view_limits, view_from_limits
 import movie_writer
 import preset_views
@@ -1578,11 +1579,17 @@ class SettingsFrame(Tk.Toplevel):
         self.LorentzBoostVar = Tk.IntVar()
         self.LorentzBoostVar.set(self.parent.MainParamDict['DoLorentzBoost'])
         self.LorentzBoostVar.trace('w', self.LorentzBoostChanged)
-        cb = ttk.Checkbutton(frm, text='Boost PhasePlots', variable =  self.LorentzBoostVar).grid(row = 18, sticky = Tk.W)
-        ttk.Label(frm, text='Gamma/Beta = \r (- for left boost)').grid(row= 18, rowspan = 2,column =1, sticky = Tk.E)
+        cb = ttk.Checkbutton(frm, text='Boost phase plots along x', variable =  self.LorentzBoostVar).grid(row = 18, sticky = Tk.W)
+        # One number sets the speed of the frame: a value below 1 in size is
+        # read as beta = v/c, anything else as the Lorentz factor Gamma.
+        ttk.Label(frm, text='Frame speed (β or Γ):').grid(row= 18, column =1, sticky = Tk.E)
         self.GammaVar = Tk.StringVar()
         self.GammaVar.set(str(self.parent.MainParamDict['GammaBoost']))
-        ttk.Entry(frm, textvariable=self.GammaVar, width = 7).grid(row = 18, column = 2, sticky = Tk.N)
+        ttk.Entry(frm, textvariable=self.GammaVar, width = 7).grid(row = 18, column = 2, sticky = Tk.W)
+        self.BoostReadout = ttk.Label(frm, foreground = 'gray30')
+        self.BoostReadout.grid(row = 19, column = 0, columnspan = 3, sticky = Tk.W)
+        self.GammaVar.trace('w', self.UpdateBoostReadout)
+        self.UpdateBoostReadout()
 
     def xScaleHandler(self, e):
         # if changing the scale will change the value of the parameter, do so
@@ -1665,6 +1672,21 @@ class SettingsFrame(Tk.Toplevel):
             self.parent.MainParamDict['HorizontalCbars'] = self.CbarOrientation.get()
             self.parent.f.subplots_adjust( **self.parent.SubPlotParams)
             self.parent.RenewCanvas(ForceRedraw=True)
+
+    def UpdateBoostReadout(self, *args):
+        '''Spell out the boost the frame-speed entry describes.'''
+        try:
+            value = float(self.GammaVar.get())
+        except ValueError:
+            self.BoostReadout.config(text = '    Enter β = v/c (|β| < 1) or Γ (≥ 1); negative boosts toward −x.')
+            return
+        boost = phase_space.boost_factors(value)
+        if boost is None or boost[1] == 0:
+            text = 'no boost'
+        else:
+            big_gamma, beta = boost
+            text = f'β = {abs(beta):.4g}, Γ = {big_gamma:.4g}, frame moving toward {"+" if beta > 0 else "−"}x'
+        self.BoostReadout.config(text = '    ' + text + '   (|value| < 1 is β, else Γ; − for −x)')
 
     def LorentzBoostChanged(self, *args):
         if self.LorentzBoostVar.get() == self.parent.MainParamDict['DoLorentzBoost']:
@@ -3480,10 +3502,10 @@ class MainApp(Tk.Tk):
                     # A panel that did not draw has no lines to write to.
                     continue
                 if self.SubPlotList[i][j].chartType =='PhasePlot' or self.SubPlotList[i][j].chartType =='EnergyPlot':
-                    # The integration region is a range in x, so it only gets
-                    # drawn on panels that are plotted against x.
+                    # The integration region is a range in x drawn as vertical
+                    # lines, so it only goes on panels with x running horizontally.
                     if self.SubPlotList[i][j].GetPlotParam('show_int_region') \
-                            and plot_axes.shows_axis(self.SubPlotList[i][j].graph, 'x'):
+                            and plot_axes.marker_orientation(self.SubPlotList[i][j].graph, 'x') == 'v':
                         self.phase_plot_list.append([i,j])
                 if self.SubPlotList[i][j].chartType =='SpectraPlot':
                     self.spectral_plot_list.append([i,j])
