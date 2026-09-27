@@ -1,8 +1,8 @@
 
 #!/usr/bin/env python
 import time
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import new_cmaps

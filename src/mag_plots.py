@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma
@@ -185,17 +185,8 @@ class BPanel:
                 self.ann_label = r'$|\delta B_\perp|$'
             if 'deltaB_perp' in self.parent.DataDict.keys():
                 self.f = self.parent.DataDict['deltaB_perp']
-            elif np.isnan(self.parent.btheta):
-                self.f = 1.0
             else:
-                if np.abs(self.parent.bz0) <= 1E-6:
-                    # Decompose the perpendicular components of the magnetic fields into two parts
-                    # one is bz, the other is the in plane components
-                    delta_by_perp = (self.FigWrap.LoadKey('by')-self.parent.by0)#*np.cos(self.parent.btheta)
-                    self.f = np.sqrt(delta_by_perp**2+(self.FigWrap.LoadKey('bz')-self.parent.bz0)**2)/self.parent.b0
-                    self.parent.DataDict['delta_b_perp'] = self.f
-
-                self.parent.DataDict['deltaB_perp'] = self.f
+                self.f = self.delta_b_parts()[0]
 
         if self.GetPlotParam('mag_plot_type') == 3: # Set f to deltaB_para/B0
             if not np.isnan(self.parent.btheta):
@@ -207,18 +198,34 @@ class BPanel:
 
             if 'deltaB_para' in self.parent.DataDict.keys():
                 self.f = self.parent.DataDict['deltaB_para']
-            elif np.isnan(self.parent.btheta):
-                self.f = 1.0
             else:
-                if np.abs(self.parent.bz0) <= 1E-6:
-                # Decompose the perpendicular components of the magnetic fields into two parts
-                # one is bz, the other is the in plane components
+                self.f = self.delta_b_parts()[1]
 
-                    # First take the dot product:
-                    b_para = self.FigWrap.LoadKey('bx')#*self.parent.bx0+self.FigWrap.LoadKey('by')[0,:,:]*self.parent.by0
-                    #b_para *= self.parent.b0**(-1)
-                    self.f = (b_para-self.parent.b0)/self.parent.b0
-                    self.parent.DataDict['deltaB_para'] = self.f
+    def delta_b_parts(self):
+        '''The change in B across and along the background field B0, both
+        normalized by |B0|, and cached in the DataDict.
+
+        A background field in the simulation plane is taken to lie along x,
+        and one of unknown direction (btheta is NaN, e.g. no background) to be
+        zero along x. Otherwise B is projected onto B0's direction.'''
+        p = self.parent
+        bx = self.FigWrap.LoadKey('bx')
+        by = self.FigWrap.LoadKey('by')
+        bz = self.FigWrap.LoadKey('bz')
+        if np.isnan(p.btheta) or np.abs(p.bz0) <= 1E-6:
+            # Decompose the perpendicular components of the magnetic fields into two parts
+            # one is bz, the other is the in plane components
+            b0_along_x = 0.0 if np.isnan(p.btheta) else p.b0
+            perp = np.sqrt((by-p.by0)**2+(bz-p.bz0)**2)/p.b0
+            para = (bx-b0_along_x)/p.b0
+        else:
+            ux, uy, uz = p.bx0/p.b0, p.by0/p.b0, p.bz0/p.b0
+            b_along = bx*ux + by*uy + bz*uz
+            perp = np.sqrt((bx-b_along*ux)**2 + (by-b_along*uy)**2 + (bz-b_along*uz)**2)/p.b0
+            para = (b_along-p.b0)/p.b0
+        p.DataDict['deltaB_perp'] = perp
+        p.DataDict['deltaB_para'] = para
+        return perp, para
 
     def draw(self):
 

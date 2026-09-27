@@ -26,5 +26,7 @@ dependencies:
   # File Handling
   - h5py>=3.11
   - pyyaml>=6.0
-  # Plotting
-  - matplotlib=3.7
+  # Plotting. matplotlib-base leaves out matplotlib's own choice of Qt; Iseult
+  # uses PySide6 (Qt 6).
+  - matplotlib-base=3.7
+  - pyside6>=6.5

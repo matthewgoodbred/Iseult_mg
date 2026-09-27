@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma

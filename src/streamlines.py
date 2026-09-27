@@ -3,7 +3,7 @@
 streamline and vector potential (Az) contour overlays for Iseult.
 """
 
-import tkinter as Tk
+import qt_compat as Tk
 import numpy as np
 
 import fast_streamplot
@@ -780,7 +780,9 @@ def draw_az_contours(panel):
     bx = panel.parent.DataDict[bx_name][slice_tuple]
     by = panel.parent.DataDict[by_name][slice_tuple]
 
-    if bx.ndim != 2 or by.ndim != 2:
+    # A plane that is one cell thick, e.g. y-z or x-z in a 2D run, has nothing
+    # to contour.
+    if bx.ndim != 2 or by.ndim != 2 or min(bx.shape) < 2:
         return
 
     Az = compute_vector_potential_2d(bx, by, stride=stride, dx=dx)

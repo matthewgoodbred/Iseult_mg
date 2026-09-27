@@ -115,8 +115,11 @@ def test___handle_tristan_v2_datasets():
                                        np.full((1,5,10), 2),np.full((1,5,10), 11),
                                        np.full((1,5,10), 12),np.full((1,5,10), 13),
                                        np.full((1,5,10), 14),np.full((1,5,10), 15),
-                                       np.full((1,5,10), 16),np.full((1,5,10), 7),
-                                       np.full((1,5,10), 4)]}
+                                       np.full((1,5,10), 16),
+                                       # dens is summed over all four species (3+4+5+6),
+                                       # densi over the positively charged ones (4+6)
+                                       np.full((1,5,10), 18),
+                                       np.full((1,5,10), 10)]}
 
     for name in file_names:
         with h5py.File(data_dir / name, 'r') as file:
@@ -195,7 +198,7 @@ def test_handle_tristan_v2_spectra():
     parser = argparse.ArgumentParser()
     parser.add_argument("--electron-spectra", default=None)
     parser.add_argument("--ion-spectra", default=None)
-    cli_args = parser.parse_args()
+    cli_args = parser.parse_args([])
 
     dataset_names = ('compute_electron_spectrum', 'compute_ion_spectrum')
 
@@ -224,3 +227,18 @@ def test_handle_tristan_v2_spectra_cli_args():
 def test_handle_tristan_v2_spectra_raise_ValueError():
     with pytest.raises(ValueError):
         data_loading.__handle_tristan_v2_spectra(None, None, dataset_name='this is a bad value', cli_args=None)
+def test_tristan_v2_particle_charges():
+    '''che/chi are each particle's charge: its weight times its species' charge.'''
+    data_dir = repo_root / 'tests' / 'data' / 'tristan_v2' / 'single_directory'
+    with h5py.File(data_dir / 'prtl.tot.00070', 'r') as prtl, h5py.File(data_dir / 'params.00070', 'r') as params:
+        for name, species in (('che', 1), ('chi', 2)):
+            expected = prtl[f'wei_{species}'][:] * params[f'particles:ch{species}'][0]
+            result = data_loading.load_dataset(data_dir / 'prtl.tot.00070', name)
+            assert np.allclose(result, expected), name
+    assert np.all(data_loading.load_dataset(data_dir / 'prtl.tot.00070', 'che') < 0)
+
+def test_particle_data_stays_an_array():
+    '''A stride that leaves a single particle still gives a list of particles.'''
+    file_path = repo_root / 'tests' / 'data' / 'tristan_v1' / 'prtl.tot.041'
+    result = data_loading.load_dataset(file_path, 'ui', slice(None, None, 5))
+    assert isinstance(result, np.ndarray) and result.shape == (1,)

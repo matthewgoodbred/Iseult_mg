@@ -227,6 +227,30 @@ def __load_tristan_v2_density(field_file_path: pathlib.Path, field_file: h5py.Fi
 # =============================================================================
 
 # =============================================================================
+def __find_tristan_v2_params(data_file_path: pathlib.Path) -> pathlib.Path:
+    """The parameter file that goes with a Tristan v2 fields or particle file, which is
+    either beside it or, in the standard directory structure, one directory up."""
+    param_file_name = 'params' + data_file_path.suffix
+    param_file_path = data_file_path.parents[0] / param_file_name
+    if not param_file_path.is_file():
+        param_file_path = data_file_path.parents[1] / param_file_name
+    return param_file_path
+# =============================================================================
+
+# =============================================================================
+def __load_tristan_v2_charges(prtl_file_path: pathlib.Path, prtl_file: h5py.File, species: int, dataset_slice: tuple | slice) -> np.ndarray:
+    """The charge of each macroparticle of `species`, as in Tristan v1's che/chi: the
+    species' charge (particles:ch#) times the particle's weight (wei_#). Particles
+    with no weights written all have weight one."""
+    with h5py.File(__find_tristan_v2_params(prtl_file_path), 'r') as param_file:
+        charge = float(param_file['particles:ch' + str(species)][0])
+    weights = 'wei_' + str(species)
+    if weights in prtl_file:
+        return prtl_file[weights][dataset_slice] * charge
+    return np.ones(prtl_file['u_' + str(species)].shape)[dataset_slice] * charge
+# =============================================================================
+
+# =============================================================================
 def __load_tristan_v2_density_by_charge(field_file_path: pathlib.Path, field_file: h5py.File, dataset_slice: tuple | slice, sign: str) -> np.ndarray:
     """Sum the per-species number density (dens#/m#) over all species whose charge matches `sign`.
 
@@ -237,11 +261,7 @@ def __load_tristan_v2_density_by_charge(field_file_path: pathlib.Path, field_fil
         particles:ch#) to include in the sum. 'positive' -> ion-like density,
         'negative' -> electron-like density, 'all' -> total density.
     """
-    # Find the parameter file
-    param_file_name = 'params' + field_file_path.suffix
-    param_file_path = field_file_path.parents[0] / param_file_name
-    if not param_file_path.is_file():
-        param_file_path = field_file_path.parents[1] / param_file_name
+    param_file_path = __find_tristan_v2_params(field_file_path)
 
     total = None
     with h5py.File(param_file_path, 'r') as param_file:
@@ -333,6 +353,8 @@ def __handle_tristan_v2(file_path: pathlib.Path, file: h5py.File, dataset_name: 
               'indi':'ind_2',
               'proce':'proc_1',
               'proci':'proc_2',
+              'che':'charge_1', # weight x species charge, see __load_tristan_v2_charges
+              'chi':'charge_2',
               # Fields file
               'bx':'bx',
               'by':'by',
@@ -367,7 +389,8 @@ def __handle_tristan_v2(file_path: pathlib.Path, file: h5py.File, dataset_name: 
     special_handling_list = [v2_map['dens'], v2_map['densi'], v2_map['gamma0'],
                              v2_map['spece'], v2_map['specerest'],
                              v2_map['specp'], v2_map['specprest'],
-                             v2_map['my0'], v2_map['my'], v2_map['time']]
+                             v2_map['my0'], v2_map['my'], v2_map['time'],
+                             v2_map['che'], v2_map['chi']]
     if dataset_name not in special_handling_list:
         # Check that the dataset exists, return zero data and print warning if it doesn't.
         if dataset_name not in file:
@@ -385,6 +408,8 @@ def __handle_tristan_v2(file_path: pathlib.Path, file: h5py.File, dataset_name: 
         # Iseult derives the electron density downstream as dens - densi, which then
         # equals the sum over all negatively charged species.
         return __load_tristan_v2_density_by_charge(file_path, file, dataset_slice, 'positive')
+    elif dataset_name in [v2_map['che'], v2_map['chi']]:
+        return __load_tristan_v2_charges(file_path, file, int(dataset_name[-1]), dataset_slice)
     elif dataset_name == v2_map['gamma0']:
         warnings.warn('"gamma0" is not present in Tristan v2 datasets. Setting gamma0=1')
         return np.array([1])
@@ -468,8 +493,11 @@ def load_dataset(file_path: str | pathlib.Path, dataset_name: str, dataset_slice
             # If the data is from Tristan v2 then perform whatever handling is needed.
             loaded_data = __handle_tristan_v2(file_path, file, dataset_name, dataset_slice, cli_args)
 
-        # Reduce to a scalar if the array is size 1
-        if loaded_data.size == 1 and dataset_name != 'xsl':
+        # Reduce to a scalar if the array is size 1. Particle data stays an
+        # array: with a stride, or a nearly empty species, a list of particles
+        # can be down to one, and it is still a list.
+        is_particles = file_path.name.startswith('prtl')
+        if loaded_data.size == 1 and dataset_name != 'xsl' and not is_particles:
             return loaded_data.item()
 
         return loaded_data

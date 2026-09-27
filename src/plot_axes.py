@@ -14,8 +14,8 @@ and everything that used to be hard-coded to x (labels, array slicing,
 particle coordinates, which axes are shared between panels) is derived from
 those two params here so that the panels stay in step with each other.
 """
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 
 import numpy as np
 

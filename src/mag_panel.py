@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-#import tkinter as Tk
-#from tkinter import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma
@@ -122,7 +120,8 @@ class BPanel:
                 self.ylabel = r'$|\delta B_\perp|$'
                 self.ann_label = r'$|\delta B_\perp|$'
             if np.isnan(self.parent.btheta):
-                self.f = 1.0
+                # No known background field: B_perp is measured from zero, across x
+                self.f = np.sqrt(getattr(output, 'by')**2+getattr(output, 'bz')**2)
             else:
                 if np.abs(self.parent.b0) >= 1E-10:
                     # Decompose the perpendicular components of the magnetic fields into two parts
@@ -146,7 +145,8 @@ class BPanel:
                 self.ann_label = r'$\delta B_\parallel$'
 
             if np.isnan(self.parent.btheta):
-                self.f = 1.0
+                # No known background field: B_para is measured from zero, along x
+                self.f = np.array(getattr(output, 'bx'), dtype=float)
             else:
                 # First take the dot product:
                 b_para = getattr(output, 'bx')#*self.parent.bx0+getattr(output, 'by')[0,:,:]*self.parent.by0

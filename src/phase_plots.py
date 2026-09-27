@@ -1,6 +1,6 @@
 #!/usr/bin/env pythonw
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import new_cmaps
@@ -612,7 +612,7 @@ class PhaseSettings(Tk.Toplevel):
         self.BuildSelection(frm).grid(row = 2, column = 0, sticky = Tk.EW, **self.PAD)
         self.BuildDisplay(frm).grid(row = 3, column = 0, sticky = Tk.EW, **self.PAD)
 
-        ttk.Label(frm, text = 'Press Enter to apply typed values.',
+        ttk.Label(frm, text = 'Typed values apply on Enter, or on leaving the box.',
                   foreground = 'gray40').grid(row = 4, column = 0, sticky = Tk.W, **self.PAD)
 
         self.UpdateAxisDependentControls()

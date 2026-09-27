@@ -1,20 +1,28 @@
 #! /usr/bin/env python
 import re # regular expressions
 import os, sys # Used to make the code portable
+
+# Iseult is mostly used over VNC. There, OpenGL integration only slows Qt's
+# start up, and a fractional scale factor would have matplotlib render (and
+# VNC ship) more pixels than the screen shows.
+os.environ.setdefault('QT_XCB_GL_INTEGRATION', 'none')
+os.environ.setdefault('QT_ENABLE_HIGHDPI_SCALING', '0')
+
 import data_loading # Allows us the read the data files
 import time, string, io
 import traceback # so one broken panel can be reported instead of crashing Iseult
 from PIL import Image
 import matplotlib
-matplotlib.use('TkAgg')
+matplotlib.use('QtAgg')
 import new_cmaps
 import numpy as np
 from collections import deque
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-import matplotlib.animation as manimation
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6.QtCore import Qt
 from phase_plots import PhasePanel
 from fields_plots import FieldsPanel
 from density_plots import DensPanel
@@ -32,18 +40,11 @@ import movie_writer
 import preset_views
 from functools import partial
 import subprocess, yaml
-from PIL import Image
 import pathlib
 
-#import datetime
-#from ThreeD_mag_plots import ThreeDBPanel STILL TESTING
-
-# I don't think that matplotlib allows multi-threading, in the interactive mode.
-# This is a flag that i have so I can mess around trying to get it to work.
-Use_MultiProcess = False # DO NOT SET TO TRUE!
-import time
-import tkinter as Tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+# The settings panes are written against Tk's API, which qt_compat provides on Qt.
+import qt_compat as Tk
+from qt_compat import ttk, filedialog, messagebox, simpledialog
 
 matplotlib.rcParams['mathtext.fontset'] = 'stix'
 matplotlib.rcParams['font.family'] = 'STIXGeneral'
@@ -55,39 +56,61 @@ matplotlib.rcParams['axes.titley'] = 1.0
 
 import argparse
 
-def destroy(e):
-    sys.exit()
 
-class MyCustomToolbar(NavigationToolbar2Tk):
-    def __init__(self, plotCanvas, parent):
-        # create the default toolbar
-        # plotCanvas is the tk Canvas we want to link to the toolbar,
-        # parent is the iseult main app
-        NavigationToolbar2Tk.__init__(self, plotCanvas, parent)
-        #print(self._nav_stack)
-        self.parent = parent
+class IseultCanvas(FigureCanvasQTAgg):
+    '''The figure's canvas. Redrawing the whole figure is slow, so while the
+    window is being resized only the last size it settles on is drawn.'''
+
+    RESIZE_DELAY_MS = 150
+
+    def __init__(self, figure):
+        FigureCanvasQTAgg.__init__(self, figure)
+        # Clicking the figure takes focus from any entry being typed in, as in Tk
+        self.setFocusPolicy(Qt.ClickFocus)
+        self._pending_resize = None
+        self._resize_timer = QtCore.QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._apply_resize)
+        self._sized = False
+
+    def resizeEvent(self, event):
+        if not self._sized:
+            # The first size is the one everything is laid out with; use it now.
+            self._sized = True
+            FigureCanvasQTAgg.resizeEvent(self, event)
+            return
+        self._pending_resize = QtGui.QResizeEvent(event.size(), event.oldSize())
+        self._resize_timer.start(self.RESIZE_DELAY_MS)
+
+    def _apply_resize(self):
+        event, self._pending_resize = self._pending_resize, None
+        if event is not None:
+            FigureCanvasQTAgg.resizeEvent(self, event)
+
+
+class MyCustomToolbar(NavigationToolbar2QT):
+    '''matplotlib's navigation toolbar, which also has Iseult check whether a
+    change of view needs the viewport-filtered plots to be remade.'''
+
+    def __init__(self, plotCanvas, app, parent):
+        # plotCanvas is the canvas we want to link to the toolbar,
+        # app is the iseult main app
+        NavigationToolbar2QT.__init__(self, plotCanvas, parent, coordinates=True)
+        self.app = app
+        self.setMovable(False)
+        self.setIconSize(QtCore.QSize(20, 20))
 
     def home(self, *args, **kwargs):
-        NavigationToolbar2Tk.home(self, *args, **kwargs)
-        self.parent.after(100, self.parent.check_limits_and_renew)
+        NavigationToolbar2QT.home(self, *args, **kwargs)
+        self.app.after(100, self.app.check_limits_and_renew)
 
     def back(self, *args, **kwargs):
-        NavigationToolbar2Tk.back(self, *args, **kwargs)
-        self.parent.after(100, self.parent.check_limits_and_renew)
+        NavigationToolbar2QT.back(self, *args, **kwargs)
+        self.app.after(100, self.app.check_limits_and_renew)
 
     def forward(self, *args, **kwargs):
-        NavigationToolbar2Tk.forward(self, *args, **kwargs)
-        self.parent.after(100, self.parent.check_limits_and_renew)
-
-class Spinbox(ttk.Entry):
-    def __init__(self, master=None, **kw):
-        ttk.Entry.__init__(self, master, "ttk::spinbox", **kw)
-
-    def current(self, newindex=None):
-        return self.tk.call(self._w, 'current', index)
-
-    def set(self, value):
-        return self.tk.call(self._w, 'set', value)
+        NavigationToolbar2QT.forward(self, *args, **kwargs)
+        self.app.after(100, self.app.check_limits_and_renew)
 
 class SubPlotWrapper:
     """A simple class that will eventually hold all of the information
@@ -368,6 +391,12 @@ class SubPlotWrapper:
         when refreshing the axes as it requires the line objects to already be
         created.'''
         horiz_locs, vert_locs = self.CpuDomainLocs()
+        # The number of boundaries changes with the plane shown, so the lines
+        # made for the last one may not fit.
+        if len(self.cpu_x_lines) != len(horiz_locs) or len(self.cpu_y_lines) != len(vert_locs):
+            self.RemoveCpuDomainLines()
+            self.SetCpuDomainLines()
+            return
         for i in range(len(self.cpu_x_lines)):
             self.cpu_x_lines[i].set_xdata([horiz_locs[i],horiz_locs[i]])
 
@@ -456,348 +485,431 @@ class Param:
         return value
 
 
-class PlaybackBar(Tk.Frame):
+
+class PlaybackBar(QtWidgets.QToolBar):
 
     """
-    A Class that will handle the time-stepping in Iseult, and has the
-    following, a step left button, a play/pause button, a step right button, a
-    playbar, and a settings button.
+    The bar that handles the time-stepping in Iseult: step left, play/pause,
+    step right, the time step, a slider through the simulation, loop and
+    record toggles, and buttons for the measurement and general settings
+    and for reloading or refreshing the data.
     """
 
-    def __init__(self, parent, param, canvas = None):
-        Tk.Frame.__init__(self)
-        self.parent = parent
+    def __init__(self, app, param):
+        QtWidgets.QToolBar.__init__(self, 'Playback', app.window)
+        self.app = app
         self.playPressed = False
+        self.setMovable(False)
+        self.setIconSize(QtCore.QSize(20, 20))
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        style = self.style()
 
         # This param should be the time-step of the simulation
         self.param = param
 
-        # make a button that skips left
-        self.skipLB = ttk.Button(self, text = '<', command = self.SkipLeft)
-        self.skipLB.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
+        self.skipLB = self.addAction(style.standardIcon(QtWidgets.QStyle.SP_MediaSeekBackward), '')
+        self.skipLB.setToolTip('Step back (Left arrow)')
+        self.skipLB.triggered.connect(self.SkipLeft)
 
-        # make the play button
-        self.playB = ttk.Button(self, text = 'Play', command = self.PlayHandler)
-        self.playB.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
+        self._play_icon = style.standardIcon(QtWidgets.QStyle.SP_MediaPlay)
+        self._pause_icon = style.standardIcon(QtWidgets.QStyle.SP_MediaPause)
+        self.playB = self.addAction(self._play_icon, 'Play')
+        self.playB.setToolTip('Play / pause (Space)')
+        self.playB.triggered.connect(self.PlayHandler)
 
-        # a button that skips right
-        self.skipRB = ttk.Button(self, text = '>', command = self.SkipRight)
-        self.skipRB.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
+        self.skipRB = self.addAction(style.standardIcon(QtWidgets.QStyle.SP_MediaSeekForward), '')
+        self.skipRB.setToolTip('Step forward (Right arrow)')
+        self.skipRB.triggered.connect(self.SkipRight)
 
-        # An entry box that will let us choose the time-step
-        ttk.Label(self, text='n= ').pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
+        self.addSeparator()
+        self.addWidget(QtWidgets.QLabel(' n = '))
 
-        # A StringVar for a box to type in a frame num, linked to self.param
-        self.tstep = Tk.StringVar()
-        # set it to the param value
-        self.tstep.set(str(self.param.value))
+        # The box to type a time step into. Enter (or leaving the box) goes there.
+        self.tstep = QtWidgets.QSpinBox()
+        self.tstep.setKeyboardTracking(False)
+        self.tstep.setRange(self.param.minimum, self.param.maximum)
+        self.tstep.setValue(self.param.value)
+        self.tstep.setMinimumWidth(70)
+        self.tstep.valueChanged.connect(self.TextCallback)
+        self.addWidget(self.tstep)
+        self.maxLabel = QtWidgets.QLabel()
+        self.addWidget(self.maxLabel)
 
-        # the entry box
-        self.txtEnter = ttk.Entry(self, textvariable=self.tstep, width=6)
-        self.txtEnter.pack(side=Tk.LEFT, fill = Tk.BOTH, expand = 0)
+        # A slider that shows the progress through the simulation and selects
+        # a time. Dragging it only changes the number shown; the time step is
+        # drawn once it is let go of.
+        self.slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.slider.setRange(self.param.minimum, self.param.maximum)
+        self.slider.setValue(self.param.value)
+        self.slider.setMinimumWidth(120)
+        self.slider.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self.slider.setFocusPolicy(Qt.NoFocus)
+        self.slider.valueChanged.connect(self.ScaleHandler)
+        self.slider.sliderReleased.connect(self.UpdateValue)
+        self.addWidget(self.slider)
+        self._show_max()
 
-        # A slider that will show the progress in the simulation as well as
-        # allow us to select a time. Now the slider just changes the tstep box
-        self.slider = ttk.Scale(self, from_=self.param.minimum, to=self.param.maximum, command = self.ScaleHandler)
-        self.slider.set(self.param.value)
-        self.slider.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=1)
-        # bind releasing the moust button to updating the plots.
-        self.slider.bind("<ButtonRelease-1>", self.UpdateValue)
+        self.addSeparator()
+        self.LoopB = QtWidgets.QCheckBox('Loop')
+        self.LoopB.setChecked(bool(self.app.MainParamDict['LoopPlayback']))
+        self.LoopB.toggled.connect(self.LoopChanged)
+        self.addWidget(self.LoopB)
+        self.RecB = QtWidgets.QCheckBox('Record')
+        self.RecB.setToolTip('Save a PNG of every time step drawn')
+        self.RecB.setChecked(bool(self.app.MainParamDict['Recording']))
+        self.RecB.toggled.connect(self.RecChanged)
+        self.addWidget(self.RecB)
 
-        new_frame = ttk.Frame(self)
-        self.LoopVar = Tk.IntVar()
-        self.LoopVar.set(self.parent.MainParamDict['LoopPlayback'])
-        self.LoopVar.trace('w', self.LoopChanged)
-        self.RecordFrames = ttk.Checkbutton(new_frame, text = 'Loop',
-                                            variable = self.LoopVar)
-        self.RecordFrames.pack(side=Tk.TOP, fill=Tk.BOTH, expand=0)
+        self.addSeparator()
+        self.MeasuresB = self.addAction('FFT')
+        self.MeasuresB.setToolTip('FFT measurement region')
+        self.MeasuresB.triggered.connect(self.OpenMeasures)
+        self.SettingsB = self.addAction('Settings')
+        self.SettingsB.setToolTip('General settings (S)')
+        self.SettingsB.triggered.connect(self.app.OpenSettings)
+        reload_action = self.addAction(style.standardIcon(QtWidgets.QStyle.SP_BrowserReload), 'Reload')
+        reload_action.setToolTip('Look for new output files (R)')
+        reload_action.triggered.connect(self.OnReload)
+        refresh_action = self.addAction('Refresh')
+        refresh_action.setToolTip('Reload the current time step from disk')
+        refresh_action.triggered.connect(self.OnRefresh)
 
+        # The play loop
+        self.timer = QtCore.QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.blink)
 
-        self.RecVar = Tk.IntVar()
-        self.RecVar.set(self.parent.MainParamDict['Recording'])
-        self.RecVar.trace('w', self.RecChanged)
-        ttk.Checkbutton(new_frame, text = 'Record',
-                        variable = self.RecVar).pack(side=Tk.TOP, fill=Tk.BOTH, expand=0)
-        new_frame.pack(side= Tk.LEFT, fill = Tk.BOTH, expand =0)
-
-        # a measurement button that should lauch a window to take measurements.
-        self.MeasuresB= ttk.Button(self, text='FFT', command=self.OpenMeasures)
-        self.MeasuresB.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
-
-
-        # a settings button that should lauch some global settings.
-        self.SettingsB= ttk.Button(self, text='Settings', command=self.parent.OpenSettings)
-        self.SettingsB.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
-
-        # a reload button that reloads the files and then refreshes the plot
-        ttk.Button(self, text = 'Reload', command = self.OnReload).pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
-        # a refresh button that refreshing the current timestep
-        ttk.Button(self, text = 'Refresh', command = self.OnRefresh).pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
         #attach the parameter to the Playbackbar
         self.param.attach(self)
 
+    ####
+    #
+    # What MainApp tells the bar
+    #
+    ####
+
+    def show_step(self, value):
+        '''Show `value` as the current time step without acting on it.'''
+        for widget in (self.tstep, self.slider):
+            widget.blockSignals(True)
+            widget.setValue(int(value))
+            widget.blockSignals(False)
+
+    def set_max(self, maximum):
+        maximum = max(int(maximum), self.param.minimum)
+        for widget in (self.tstep, self.slider):
+            widget.blockSignals(True)
+            widget.setMaximum(maximum)
+            widget.blockSignals(False)
+        self._show_max()
+
+    def _show_max(self):
+        self.maxLabel.setText(' / %d ' % self.slider.maximum())
+        self.slider.setPageStep(max(1, self.slider.maximum() // 20))
+
+    def set_recording(self, value):
+        self.RecB.blockSignals(True)
+        self.RecB.setChecked(bool(value))
+        self.RecB.blockSignals(False)
+
+    def set_loop(self, value):
+        self.LoopB.blockSignals(True)
+        self.LoopB.setChecked(bool(value))
+        self.LoopB.blockSignals(False)
+
+    ####
+    #
+    # Handlers
+    #
+    ####
+
     def OnReload(self, *args):
-        _ = self.parent.checkAndFindFilePaths(reload_mode = True)
-        self.parent.RenewCanvas()
+        _ = self.app.checkAndFindFilePaths(reload_mode = True)
+        self.app.RenewCanvas()
 
     def OnRefresh(self, *args):
-        self.parent.RefreshTimeStep()
-        self.parent.RenewCanvas()
+        self.app.RefreshTimeStep()
+        self.app.RenewCanvas()
 
-    def RecChanged(self, *args):
-        if self.RecVar.get() == self.parent.MainParamDict['Recording']:
-            pass
-        else:
-            self.parent.MainParamDict['Recording'] = self.RecVar.get()
-            if self.parent.MainParamDict['Recording'] == 1:
-                self.parent.PrintFig()
+    def RecChanged(self, checked):
+        value = int(checked)
+        if value != self.app.MainParamDict['Recording']:
+            self.app.MainParamDict['Recording'] = value
+            if value == 1:
+                self.app.PrintFig()
 
-    def LoopChanged(self, *args):
-        if self.LoopVar.get() == self.parent.MainParamDict['LoopPlayback']:
-            pass
-        else:
-            self.parent.MainParamDict['LoopPlayback'] = self.LoopVar.get()
+    def LoopChanged(self, checked):
+        self.app.MainParamDict['LoopPlayback'] = int(checked)
 
-    def SkipLeft(self, e = None):
-        self.parent.StepInteractively(lambda: self.param.set(self.param.value - self.parent.MainParamDict['SkipSize']))
+    def SkipLeft(self, *args):
+        self.app.StepInteractively(lambda: self.param.set(self.param.value - self.app.MainParamDict['SkipSize']))
 
-    def SkipRight(self, e = None):
-        self.parent.StepInteractively(lambda: self.param.set(self.param.value + self.parent.MainParamDict['SkipSize']))
+    def SkipRight(self, *args):
+        self.app.StepInteractively(lambda: self.param.set(self.param.value + self.app.MainParamDict['SkipSize']))
 
-    def PlayHandler(self, e = None):
+    def PlayHandler(self, *args):
         if not self.playPressed:
-            # Set the value of play pressed to true, change the button name to
-            # pause, turn off clear_fig, and start the play loop.
             self.playPressed = True
-            self.parent.RenewCanvas()
-            """
-            if not self.parent.MainParamDict['Recording']:
-                #self.parent.HashIseultState()
-                already_saved = False
-                if self.parent.TimeStep.value in self.parent.SavedHashes.keys(): # we have already saved an image for this TimeStep
-                    # is the current state of Iseult equal to the state when we saved said image?
-                    already_saved = self.parent.SavedHashes[self.parent.TimeStep.value] ==  self.parent.StateHash
-
-                if not already_saved:
-                    self.parent.RenewCanvas()
-
-                # Prevent the window from being resized
-                self.parent.resizable(0,0)
-                #            self.parent.MainParamDict['ClearFig'] = False
-                tmp_size = self.parent.f.get_size_inches()*self.parent.f.dpi
-
-                # Create the figure
-                self.MovieFrame = ttk.Frame(self.parent)
-                self.parent.MovieFig = Figure(figsize = self.parent.f.get_size_inches(), dpi = self.parent.f.dpi, edgecolor = 'none')#, facecolor = '0.75')
-                self.parent.MovieFig.subplots_adjust(left = 0, right = 1, top = 1, bottom = 0 , wspace = 0, hspace = 0)
-                # a tk.DrawingArea
-                self.parent.MovieCanvas = FigureCanvasTkAgg(self.parent.MovieFig, master=self.MovieFrame)
-                #            self.parent.MovieCanvas = Tk.Canvas(self.parent, width=tmp_size[0], height=tmp_size[1])
-
-                im = Image.frombuffer('RGBA', (int(tmp_size[0]), int(tmp_size[1])), self.parent.SavedImgStr[self.parent.TimeStep.value], 'raw', 'RGBA', 0, 1)
-                self.MovieFrame.place(in_=self.parent, relx=0.5, y=0, anchor=Tk.N)#, bordermode="outside")
-                self.parent.MovieCanvas._tkcanvas.pack(side=Tk.RIGHT, fill=Tk.BOTH, expand=1)
-                self.parent.MovieAx = self.parent.MovieFig.add_subplot(111)
-                self.parent.MovieAx.axis('off')
-                self.parent.MovieIm = self.parent.MovieAx.imshow(im, interpolation = 'nearest')
-                self.parent.MovieCanvas.get_tk_widget().update_idletasks()
-            """
-            self.playB.config(text='Pause')
-
-            self.after(int(self.parent.MainParamDict['WaitTime']*1E3), self.blink)
+            self.app.RenewCanvas()
+            self.playB.setText('Pause')
+            self.playB.setIcon(self._pause_icon)
+            self.timer.start(int(self.app.MainParamDict['WaitTime']*1E3))
         else:
-            self.parent.resizable(1,1)
-            # pause the play loop, turn clear fig back on, and set the button name back to play
+            # pause the play loop and set the button back to play
             self.playPressed = False
-            try:
-                self.MovieFrame.destroy()
-            except AttributeError:
-                pass
-            self.parent.RenewCanvas()
-#            self.parent.MainParamDict['ClearFig'] = True
-            self.playB.config(text='Play')
+            self.timer.stop()
+            self.app.RenewCanvas()
+            self.playB.setText('Play')
+            self.playB.setIcon(self._play_icon)
 
-
-    def OpenMeasures(self):
-        if self.parent.measure_window is None:
-            self.parent.measure_window = MeasureFrame(self.parent)
-        else:
-            self.parent.measure_window.destroy()
-            self.parent.measure_window = MeasureFrame(self.parent)
-
+    def OpenMeasures(self, *args):
+        if self.app.measure_window is not None:
+            self.app.measure_window.destroy()
+        self.app.measure_window = MeasureFrame(self.app)
 
     def blink(self):
         if self.playPressed:
             # First check to see if the timestep can get larger
-            if self.param.value == self.param.maximum and not self.parent.MainParamDict['LoopPlayback']:
+            if self.param.value == self.param.maximum and not self.app.MainParamDict['LoopPlayback']:
                 # push pause button
                 self.PlayHandler()
-
+                return
             # otherwise skip right by size skip size
-            else:
-                self.param.set(self.param.value + self.parent.MainParamDict['SkipSize'])
+            self.param.set(self.param.value + self.app.MainParamDict['SkipSize'])
+            # Wait from the end of this frame's draw, so a slow frame is still seen
+            self.timer.start(int(self.app.MainParamDict['WaitTime']*1E3))
 
-            # start loopin'
-            self.after(int(self.parent.MainParamDict['WaitTime']*1E3), self.blink)
+    def TextCallback(self, *args):
+        value = self.tstep.value()
+        if value != self.param.value:
+            self.app.StepInteractively(lambda: self.param.set(value))
 
-
-    def TextCallback(self):
-        try:
-            #make sure the user types in a int
-            if int(self.tstep.get()) != self.param.value:
-                self.parent.StepInteractively(lambda: self.param.set(int(float(self.tstep.get()))))
-        except ValueError:
-            #if they type in random stuff, just set it ot the param value
-            self.tstep.set(str(self.param.value))
-
-    def ScaleHandler(self, e):
-        # if changing the scale will change the value of the parameter, do so
-        try:
-            if int(self.tstep.get()) != int(self.slider.get()):
-                self.tstep.set(str(int(self.slider.get())))
-        except ValueError:
-            #if they type in random stuff, just set it ot the param value
-            self.tstep.set(str(int(self.slider.get())))
+    def ScaleHandler(self, value):
+        # Follow the slider in the box. Only a released drag, a click on the
+        # groove or a key changes the time step itself.
+        self.tstep.blockSignals(True)
+        self.tstep.setValue(value)
+        self.tstep.blockSignals(False)
+        if not self.slider.isSliderDown():
+            self.UpdateValue()
 
     def UpdateValue(self, *args):
-        if int(self.slider.get()) != self.param.value:
-            self.parent.StepInteractively(lambda: self.param.set(int(self.slider.get())))
+        value = self.slider.value()
+        if value != self.param.value:
+            self.app.StepInteractively(lambda: self.param.set(value))
+
     def setKnob(self, value):
         pass
-#        #set the text entry value
-#        self.tstep.set(str(value))
-        #set the slider
-#        self.slider.set(value)
 
 
-class SaveDialog(Tk.Toplevel):
+class _FormDialog(QtWidgets.QDialog):
+    '''A modal dialog of labelled entries with OK/Cancel buttons. Subclasses
+    fill in the form and implement validate and apply.'''
 
-    def __init__(self, parent, title = None):
+    def __init__(self, app, title, ok_text = 'OK', cancel = True):
+        QtWidgets.QDialog.__init__(self, app.window)
+        self.app = app
+        self.setWindowTitle(title)
+        self.form = QtWidgets.QFormLayout()
+        self.form.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(self.form)
+        buttons = QtWidgets.QDialogButtonBox()
+        buttons.addButton(ok_text, QtWidgets.QDialogButtonBox.AcceptRole)
+        if cancel:
+            buttons.addButton(QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.ok)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-        Tk.Toplevel.__init__(self, parent)
-        self.transient(parent)
+    def entry(self, label, text = ''):
+        e = QtWidgets.QLineEdit(str(text))
+        self.form.addRow(label, e)
+        return e
 
-        if title:
-            self.title(title)
+    def ok(self):
+        if self.validate():
+            self.accept()
+            self.apply()
 
-        self.parent = parent
-
-        self.result = None
-
-        body = ttk.Frame(self)
-        self.initial_focus = self.body(body)
-#        body.pack(fill=Tk.BOTH)#, expand=True)
-        body.pack(fill = Tk.BOTH, anchor = Tk.CENTER, expand=1)
-
-        self.buttonbox()
-
-        self.grab_set()
-
-        if not self.initial_focus:
-            self.initial_focus = self
-
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-
-        self.geometry("+%d+%d" % (parent.winfo_rootx()+50,
-                                  parent.winfo_rooty()+50))
-
-        self.initial_focus.focus_set()
-
-        self.wait_window(self)
-
-    #
-    # construction hooks
-
-    def body(self, master):
-        # create dialog body.  return widget that should have
-        # initial focus.  this method should be overridden
-        ttk.Label(master, text="Name of View:").grid(row=0)
-        self.e1 = ttk.Entry(master, width=17)
-        self.e1.grid(row=0, column=1, sticky = Tk.E)
-
-    def buttonbox(self):
-        # add standard button box. override if you don't want the
-        # standard buttons
-
-        box = ttk.Frame(self)
-
-        w = ttk.Button(box, text="Save", width=10, command=self.ok, default=Tk.ACTIVE)
-        w.pack(side=Tk.LEFT, padx=5, pady=5)
-        w = ttk.Button(box, text="Cancel", width=10, command=self.cancel)
-        w.pack(side=Tk.LEFT, padx=5, pady=5)
-
-        self.bind("<Return>", self.ok)
-        self.bind("<Escape>", self.cancel)
-
-        box.pack()
-
-    #
-    # standard button semantics
-
-    def ok(self, event=None):
-
-        if not self.validate():
-            self.initial_focus.focus_set() # put focus back
-            return
-
-        self.withdraw()
-        self.update_idletasks()
-
-        self.apply()
-
-        self.cancel()
-
-    def cancel(self, event=None):
-
-        # put focus back to the parent window
-        self.parent.focus_set()
-        self.destroy()
-
-    #
-    # command hooks
+    def warn(self, message):
+        QtWidgets.QMessageBox.warning(self, 'Bad input', message)
 
     def validate(self):
-        ''' Check to make sure the config file doesn't already exist'''
-        Name = str(self.e1.get())
-#        AlreadyExists = False
-#        os.listdir(os.path.join(self.parent.IseultDir, '.iseult_configs'))
-        if Name == '':
-            messagebox.showwarning(
-                "Bad input",
-                "Field must contain a name, please try again"
-            )
-        else:
-            return 1 # override
+        return True
+
+    def apply(self):
+        pass
+
+
+class SaveDialog(_FormDialog):
+    '''Saves the current state of Iseult as a preset view.'''
+
+    def __init__(self, parent):
+        _FormDialog.__init__(self, parent, 'Save Current State', ok_text = 'Save')
+        self.e1 = self.entry('Name of view:')
+        self.exec()
+
+    def validate(self):
+        if self.e1.text().strip() == '':
+            self.warn('Field must contain a name, please try again')
+            return False
+        return True
 
     def apply(self):
         ''' Save the config file'''
-        self.parent.SaveIseultState(os.path.join(self.parent.IseultDir, '.iseult_configs', str(self.e1.get()).strip().replace(' ', '_') +'.yml'), str(self.e1.get()).strip())
-class PresetManager(Tk.Toplevel):
+        name = self.e1.text().strip()
+        self.app.SaveIseultState(os.path.join(self.app.IseultDir, '.iseult_configs', name.replace(' ', '_') +'.yml'), name)
+
+
+class MaxNDialog(_FormDialog):
+    '''Asks for the largest output file number to consider.'''
+
+    def __init__(self, parent):
+        _FormDialog.__init__(self, parent, 'Max Frame', cancel = False)
+        self.e1 = self.entry('Max frame (-1 for last frame):', self.app.cmd_args.n)
+        self.exec()
+
+    def validate(self):
+        try:
+            self.N = int(self.e1.text())
+        except ValueError:
+            self.warn('Max N must contain an int, please try again')
+            return False
+        return True
+
+    def apply(self):
+        '''Update the -n option'''
+        self.app.cmd_args.n = self.N
+
+
+class MovieDialog(_FormDialog):
+    '''Asks what frames to make a movie of, and where to save it.'''
+
+    def __init__(self, parent):
+        _FormDialog.__init__(self, parent, 'Make a Movie', ok_text = 'Save')
+        self.e1 = self.entry('Name of movie:')
+        self.e2 = self.entry('First frame:', 1)
+        self.e3 = self.entry('Last frame (-1 for final frame):', -1)
+        self.e4 = self.entry('Step size:', 1)
+        self.e5 = self.entry('Frames per second:', self.app.cmd_args.framerate)
+        # The resolution of the movie. The figure keeps its size in inches, so
+        # a higher dpi gives more pixels (and larger text in pixels), not a
+        # different layout. Defaults to the dpi of the figure on screen.
+        self.e7 = self.entry('DPI:', f'{self.app.f.dpi:g}')
+
+        row = QtWidgets.QHBoxLayout()
+        self.e6 = QtWidgets.QLineEdit(os.path.abspath(os.path.join(self.app.dirname, '..')))
+        self.e6.setMinimumWidth(320)
+        browse = QtWidgets.QPushButton('Browse…')
+        browse.setAutoDefault(False)
+        browse.clicked.connect(self.browse)
+        row.addWidget(self.e6)
+        row.addWidget(browse)
+        self.form.addRow('Movie directory:', row)
+        self.exec()
+
+    def browse(self):
+        path = filedialog.askdirectory(title = 'Movie directory', initialdir = self.e6.text(), parent = self)
+        if path:
+            self.e6.setText(path)
+
+    def validate(self):
+        ''' Check to make sure the Movie will work'''
+        name = self.e1.text().strip()
+        self.outdir = self.e6.text().strip()
+        if name == '':
+            self.warn('Field must contain a name, please try again')
+            return False
+        self.Name = name.replace(' ', '_') + '.mov'
+        try:
+            self.StartFrame = int(self.e2.text())
+            self.EndFrame = int(self.e3.text())
+        except ValueError:
+            self.warn('The first and last frames must be integers, please try again')
+            return False
+        try:
+            self.Step = int(self.e4.text())
+            assert self.Step > 0
+        except (ValueError, AssertionError):
+            self.warn('Step must be an integer >0, please try again')
+            return False
+        try:
+            self.FPS = int(self.e5.text())
+            assert self.FPS > 0
+        except (ValueError, AssertionError):
+            self.warn('FPS must be an integer >0, please try again')
+            return False
+        try:
+            self.DPI = float(self.e7.text())
+            assert self.DPI > 0
+        except (ValueError, AssertionError):
+            self.warn('DPI must be a number >0, please try again')
+            return False
+
+        n_frames = len(self.app.PathDict['Param'])
+        if self.StartFrame < 0:
+            self.StartFrame = n_frames + self.StartFrame + 1
+        if self.EndFrame < 0:
+            self.EndFrame = n_frames + self.EndFrame + 1
+        if self.StartFrame == 0:
+            self.warn('Starting frame cannot be zero')
+            return False
+        if self.EndFrame == 0:
+            self.warn('Ending frame cannot be zero')
+            return False
+
+        if not os.path.isdir(self.outdir):
+            self.warn(f'{self.outdir} is not a directory')
+            return False
+        filepath = os.path.join(self.outdir, self.Name)
+        try:
+            with open(filepath, 'w'):
+                pass
+            os.remove(filepath)
+        except IOError:
+            self.warn(f'You do not have write access to {self.outdir}')
+            return False
+        return True
+
+    def apply(self):
+        ''' Save the Movie'''
+        self.app.MakeAMovie(fname = self.Name,
+                                start = self.StartFrame,
+                                stop = self.EndFrame,
+                                step = self.Step,
+                                FPS = self.FPS,
+                                outdir = self.outdir,
+                                dpi = self.DPI)
+
+
+class _PresetList(QtWidgets.QListWidget):
+    def __init__(self, on_drop):
+        QtWidgets.QListWidget.__init__(self)
+        self.on_drop = on_drop
+
+    def dropEvent(self, event):
+        QtWidgets.QListWidget.dropEvent(self, event)
+        self.on_drop()
+
+
+class PresetManager(QtWidgets.QDialog):
     '''Delete, rename and reorder the views in the Preset Views menu.
     Every change is written to .iseult_configs right away.'''
 
     def __init__(self, parent):
-        Tk.Toplevel.__init__(self, parent)
-        self.transient(parent)
-        self.title('Manage Preset Views')
-        self.parent = parent
+        QtWidgets.QDialog.__init__(self, parent.window)
+        self.setWindowTitle('Manage Preset Views')
+        self.app = parent
         self.config_dir = os.path.join(parent.IseultDir, '.iseult_configs')
         self.presets = []
 
-        body = ttk.Frame(self, padding=8)
-        body.pack(fill=Tk.BOTH, expand=1)
+        self.listbox = _PresetList(self.dropped)
+        self.listbox.setMinimumSize(260, 320)
+        self.listbox.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+        self.listbox.itemDoubleClicked.connect(lambda item: self.rename())
 
-        self.listbox = Tk.Listbox(body, height=15, width=32, exportselection=False,
-                                  activestyle='none')
-        scroll = ttk.Scrollbar(body, orient=Tk.VERTICAL, command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=scroll.set)
-        self.listbox.grid(row=0, column=0, sticky=Tk.NSEW)
-        scroll.grid(row=0, column=1, sticky=Tk.NS)
-        body.rowconfigure(0, weight=1)
-        body.columnconfigure(0, weight=1)
-
-        buttons = ttk.Frame(body)
-        buttons.grid(row=0, column=2, sticky=Tk.N, padx=(8, 0))
+        buttons = QtWidgets.QVBoxLayout()
         for text, command in [('Move to Top', self.move_top),
                               ('Move Up', partial(self.move, -1)),
                               ('Move Down', partial(self.move, 1)),
@@ -807,51 +919,58 @@ class PresetManager(Tk.Toplevel):
                               ('Delete', self.delete),
                               (None, None),
                               ('Load', self.load),
-                              ('Close', self.destroy)]:
+                              ('Close', self.close)]:
             if text is None:
-                ttk.Separator(buttons).pack(fill=Tk.X, pady=6)
+                buttons.addSpacing(10)
             else:
-                ttk.Button(buttons, text=text, width=14, command=command).pack(pady=2)
+                b = QtWidgets.QPushButton(text)
+                b.setAutoDefault(False)
+                b.clicked.connect(command)
+                buttons.addWidget(b)
+        buttons.addStretch(1)
 
-        ttk.Label(body, text='Drag or use Alt+Up/Down to reorder. Default cannot be renamed or deleted.',
-                  wraplength=320).grid(row=1, column=0, columnspan=3, sticky=Tk.W, pady=(6, 0))
+        body = QtWidgets.QHBoxLayout()
+        body.addWidget(self.listbox, 1)
+        body.addLayout(buttons)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(body)
+        hint = QtWidgets.QLabel('Drag or use Alt+Up/Down to reorder. Default cannot be renamed or deleted.')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
-        self.listbox.bind('<Button-1>', self.drag_start)
-        self.listbox.bind('<B1-Motion>', self.drag_motion)
-        self.listbox.bind('<Double-Button-1>', lambda e: self.rename())
-        self.listbox.bind('<Alt-Up>', lambda e: self.move(-1) or 'break')
-        self.listbox.bind('<Alt-Down>', lambda e: self.move(1) or 'break')
-        self.listbox.bind('<Delete>', lambda e: self.delete())
-        self.listbox.bind('<F2>', lambda e: self.rename())
-        self.bind('<Escape>', lambda e: self.destroy())
+        for key, command in [('Alt+Up', partial(self.move, -1)),
+                             ('Alt+Down', partial(self.move, 1)),
+                             ('Delete', self.delete),
+                             ('F2', self.rename)]:
+            QtGui.QShortcut(QtGui.QKeySequence(key), self.listbox, command)
 
-        self.geometry('+%d+%d' % (parent.winfo_rootx()+50, parent.winfo_rooty()+50))
         self.refresh()
         if self.presets:
             self.select(0)
-        self.listbox.focus_set()
+        self.show()
 
     def refresh(self, select_file=None):
         self.presets = preset_views.list_presets(self.config_dir)
-        self.listbox.delete(0, Tk.END)
+        self.listbox.blockSignals(True)
+        self.listbox.clear()
         for name, fname in self.presets:
-            self.listbox.insert(Tk.END, name)
+            item = QtWidgets.QListWidgetItem(name)
+            item.setData(Qt.UserRole, fname)
             if fname in preset_views.PROTECTED:
-                self.listbox.itemconfigure(Tk.END, foreground='gray40')
+                item.setForeground(QtGui.QColor('gray'))
+            self.listbox.addItem(item)
+        self.listbox.blockSignals(False)
         if select_file is not None:
             for i, (_, fname) in enumerate(self.presets):
                 if fname == select_file:
                     self.select(i)
 
     def select(self, i):
-        self.listbox.selection_clear(0, Tk.END)
-        self.listbox.selection_set(i)
-        self.listbox.activate(i)
-        self.listbox.see(i)
+        self.listbox.setCurrentRow(i)
 
     def current(self):
-        sel = self.listbox.curselection()
-        return sel[0] if sel else None
+        row = self.listbox.currentRow()
+        return row if row >= 0 else None
 
     def reorder(self, src, dst):
         dst = max(0, min(dst, len(self.presets)-1))
@@ -861,6 +980,13 @@ class PresetManager(Tk.Toplevel):
         order.insert(dst, order.pop(src))
         preset_views.save_order(self.config_dir, order)
         self.refresh(select_file=order[dst])
+
+    def dropped(self):
+        '''Save the order the list was dragged into.'''
+        order = [self.listbox.item(i).data(Qt.UserRole) for i in range(self.listbox.count())]
+        moved = self.listbox.currentItem().data(Qt.UserRole) if self.listbox.currentItem() else None
+        preset_views.save_order(self.config_dir, order)
+        self.refresh(select_file=moved)
 
     def move(self, step):
         i = self.current()
@@ -872,15 +998,6 @@ class PresetManager(Tk.Toplevel):
 
     def move_bottom(self):
         self.reorder(self.current(), len(self.presets)-1)
-
-    def drag_start(self, event):
-        self._drag_index = self.listbox.nearest(event.y)
-
-    def drag_motion(self, event):
-        i = self.listbox.nearest(event.y)
-        if i != self._drag_index:
-            self.reorder(self._drag_index, i)
-            self._drag_index = i
 
     def rename(self):
         i = self.current()
@@ -917,347 +1034,17 @@ class PresetManager(Tk.Toplevel):
     def load(self):
         i = self.current()
         if i is not None:
-            self.parent.LoadConfig(os.path.join(self.config_dir, self.presets[i][1]))
+            self.app.LoadConfig(os.path.join(self.config_dir, self.presets[i][1]))
 
-
-class MaxNDialog(Tk.Toplevel):
-
-    def __init__(self, parent, title = None):
-
-        Tk.Toplevel.__init__(self, parent)
-        self.transient(parent)
-
-        if title:
-            self.title(title)
-
-        self.parent = parent
-
-        self.result = None
-
-        body = ttk.Frame(self)
-        self.initial_focus = self.body(body)
-#        body.pack(fill=Tk.BOTH)#, expand=True)
-        body.pack(fill = Tk.BOTH, anchor = Tk.CENTER, expand=1)
-
-        self.buttonbox()
-
-        self.grab_set()
-
-        if not self.initial_focus:
-            self.initial_focus = self
-
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-
-        self.geometry("+%d+%d" % (parent.winfo_rootx()+50,
-                                  parent.winfo_rooty()+50))
-
-        self.initial_focus.focus_set()
-
-        self.wait_window(self)
-
-    #
-    # construction hooks
-
-    def body(self, master):
-        # create dialog body.  return widget that should have
-        # initial focus.  this method should be overridden
-        ttk.Label(master, text="Max Frame (-1 for last frame):").grid(row=0)
-        self.e1 = ttk.Entry(master, width=17)
-        self.e1.insert(0,str(self.parent.cmd_args.n))
-        self.e1.grid(row=0, column=1, sticky = Tk.E)
-
-    def buttonbox(self):
-        # add standard button box. override if you don't want the
-        # standard buttons
-
-        box = ttk.Frame(self)
-
-        w = ttk.Button(box, text="OK", width=10, command=self.ok, default=Tk.ACTIVE)
-        w.pack(side=Tk.LEFT, padx=5, pady=5)
-
-        self.bind("<Return>", self.ok)
-        box.pack()
-
-    #
-    # standard button semantics
-
-    def ok(self, event=None):
-
-        if not self.validate():
-            self.initial_focus.focus_set() # put focus back
-            return
-
-        self.withdraw()
-        self.update_idletasks()
-
-        self.apply()
-
-        self.cancel()
-
-    def cancel(self, event=None):
-
-        # put focus back to the parent window
-        self.parent.focus_set()
-        self.destroy()
-
-    #
-    # command hooks
-
-    def validate(self):
-        ''' Check to make sure the user put a good input in as max file'''
-        self.N = str(self.e1.get())
+    def winfo_exists(self):
         try:
-            self.N = int(self.e1.get())
-        except ValueError:
-            self.N = ''
-        if self.N == '':
-            messagebox.showwarning(
-                "Bad input",
-                "Max N must contain an int, please try again"
-            )
-        else:
-            return 1 # override
+            return self.isVisible()
+        except RuntimeError:
+            return False
 
-    def apply(self):
-        '''Update the -n option'''
-        self.parent.cmd_args.n = int(self.N)
-
-class MovieDialog(Tk.Toplevel):
-
-    def __init__(self, parent, title = None):
-
-        Tk.Toplevel.__init__(self, parent)
-        self.transient(parent)
-
-        if title:
-            self.title(title)
-
-        self.parent = parent
-        self.result = None
-
-        body = ttk.Frame(self)
-        self.initial_focus = self.body(body, directory=os.path.abspath(os.path.join(self.parent.dirname,'../')))
-#        body.pack(fill=Tk.BOTH)#, expand=True)
-        body.pack(fill = Tk.BOTH, anchor = Tk.CENTER, expand=1)
-
-        self.buttonbox()
-
-        self.grab_set()
-
-        if not self.initial_focus:
-            self.initial_focus = self
-
-        self.protocol("WM_DELETE_WINDOW", self.cancel)
-
-        self.geometry("+%d+%d" % (parent.winfo_rootx()+50,
-                                  parent.winfo_rooty()+50))
-
-        self.initial_focus.focus_set()
-
-        self.wait_window(self)
-
-    #
-    # construction hooks
-
-    def body(self, master, directory='./'):
-        # create dialog body.  return widget that should have
-        # initial focus.  this method should be overridden
-        master.grid_columnconfigure(1, weight=1)
-        ttk.Label(master, text="Name of Movie:").grid(row=0)
-        self.e1 = ttk.Entry(master, width=17)
-        self.e1.grid(row=0, column=1, sticky=Tk.E + Tk.W)
-
-        ttk.Label(master, text="First Frame:").grid(row=1)
-        self.e2 = ttk.Entry(master, width=17)
-        self.e2.grid(row=1, column=1, sticky=Tk.E + Tk.W)
-
-        ttk.Label(master, text="Last Frame (-1 for final frame):").grid(row=2)
-        self.e3 = ttk.Entry(master, width=17)
-        self.e3.grid(row=2, column=1, sticky=Tk.E + Tk.W)
-
-        ttk.Label(master, text="Step Size:").grid(row=3)
-        self.e4 = ttk.Entry(master, width=17)
-        self.e4.grid(row=3, column=1, sticky=Tk.E + Tk.W)
-
-        ttk.Label(master, text="Frames Per Second:").grid(row=4)
-        self.e5 = ttk.Entry(master, width=17)
-        self.e5.grid(row=4, column=1, sticky=Tk.E + Tk.W)
-
-        ttk.Label(master, text="Movie Directory:").grid(row=5)
-        self.e6 = ttk.Entry(master, width=30)
-        self.e6.delete(0, Tk.END)
-        self.e6.insert(0, directory)
-        self.e6.grid(row=5, column=1, sticky=Tk.E + Tk.W)
-
-        # The resolution of the movie. The figure keeps its size in inches, so
-        # a higher dpi gives more pixels (and larger text in pixels), not a
-        # different layout. Defaults to the dpi of the figure on screen.
-        ttk.Label(master, text="DPI:").grid(row=6)
-        self.e7 = ttk.Entry(master, width=17)
-        self.e7.insert(0, f'{self.parent.f.dpi:g}')
-        self.e7.grid(row=6, column=1, sticky=Tk.E + Tk.W)
-
-
-    def buttonbox(self):
-        # add standard button box. override if you don't want the
-        # standard buttons
-
-        box = ttk.Frame(self)
-
-        w = ttk.Button(box, text="Save", width=10, command=self.ok, default=Tk.ACTIVE)
-        w.pack(side=Tk.LEFT, padx=5, pady=5)
-        w = ttk.Button(box, text="Cancel", width=10, command=self.cancel)
-        w.pack(side=Tk.LEFT, padx=5, pady=5)
-
-        self.bind("<Return>", self.ok)
-        self.bind("<Escape>", self.cancel)
-
-        box.pack()
-
-    #
-    # standard button semantics
-
-    def ok(self, event=None):
-
-        if not self.validate():
-            self.initial_focus.focus_set() # put focus back
-            return
-
-        self.withdraw()
-        self.update_idletasks()
-
-        self.apply()
-
-        self.cancel()
-
-    def cancel(self, event=None):
-
-        # put focus back to the parent window
-        self.parent.focus_set()
-        self.destroy()
-
-    #
-    # command hooks
-
-    def validate(self):
-        ''' Check to make sure the Movie will work'''
-        self.Name = str(self.e1.get())
-        try:
-            self.StartFrame = int(self.e2.get())
-        except ValueError:
-            self.StartFrame = ''
-        try:
-            self.EndFrame = int(self.e3.get())
-        except ValueError:
-            self.EndFrame = ''
-        try:
-            self.Step = int(self.e4.get())
-        except ValueError:
-            self.Step = ''
-        try:
-            self.FPS = int(self.e5.get())
-        except ValueError:
-            self.FPS = ''
-        self.outdir = str(self.e6.get().strip())
-        try:
-            self.DPI = float(self.e7.get())
-        except ValueError:
-            self.DPI = ''
-
-
-        if self.Name != '':
-            self.Name = str(self.e1.get()).strip().replace(' ', '_') +'.mov'
-        if self.StartFrame <0:
-            self.StartFrame = len(self.parent.PathDict['Param'])+self.StartFrame + 1
-        if self.EndFrame <0:
-            self.EndFrame = len(self.parent.PathDict['Param'])+self.EndFrame + 1
-
-        bad = False
-        if self.Name == '':
-            messagebox.showwarning(
-                "Bad input",
-                "Field must contain a name, please try again"
-            )
-            bad = True
-        if not os.path.isdir(self.outdir):
-            messagebox.showwarning(
-                "Bad input",
-                f"{self.outdir} is not a directory"
-            )
-            bad = True
-
-        filepath = os.path.join(self.outdir, self.Name)
-        try:
-            filehandle = open(filepath, 'w')
-            filehandle.close()
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
-        except IOError:
-            messagebox.showwarning(
-                "Bad input",
-                f"You do not have write access to {self.outdir}"
-            )
-            bad = True
-        if self.StartFrame == '':
-            messagebox.showwarning(
-                "Bad input",
-                "StartFrame must contain an int, please try again"
-            )
-        elif self.EndFrame == '':
-            messagebox.showwarning(
-                "Bad input",
-                "EndFrame must contain an int, please try again"
-            )
-        elif self.StartFrame == 0:
-            messagebox.showwarning(
-                "Bad input",
-                "Starting frame cannot be zero"
-            )
-        elif self.EndFrame == 0:
-            messagebox.showwarning(
-                "Bad input",
-                "Ending frame cannot be zero"
-            )
-
-
-        elif self.Step == '':
-            messagebox.showwarning(
-                "Bad input",
-                "Step must contain an int, please try again"
-            )
-        elif self.Step <=0:
-            messagebox.showwarning(
-                "Bad input",
-                "Step must be an integer >0, please try again"
-            )
-        elif self.FPS == '':
-            messagebox.showwarning(
-                "Bad input",
-                "FPS must contain an int >0, please try again"
-            )
-        elif self.FPS <= 0:
-            messagebox.showwarning(
-                "Bad input",
-                "FPS must contain an int >0, please try again"
-            )
-        elif self.DPI == '' or not self.DPI > 0:
-            messagebox.showwarning(
-                "Bad input",
-                "DPI must be a number >0, please try again"
-            )
-        elif bad == False:
-            return 1 # override
-
-    def apply(self):
-        ''' Save the Movie'''
-        self.parent.MakeAMovie(fname = self.Name,
-                                start = self.StartFrame,
-                                stop = self.EndFrame,
-                                step = self.Step,
-                                FPS = self.FPS,
-                                outdir = self.outdir,
-                                dpi = self.DPI)
+    def lift(self):
+        self.raise_()
+        self.activateWindow()
 
 
 class SettingsFrame(Tk.Toplevel):
@@ -1314,7 +1101,7 @@ class SettingsFrame(Tk.Toplevel):
         self.columnNum.set(self.parent.MainParamDict['NumOfCols']) # default value
         self.columnNum.trace('w', self.ColumnNumChanged)
         ttk.Label(frm, text="# of columns:").grid(row=4)
-        self.ColumnSpin = Spinbox(frm,  from_=1, to=self.parent.MainParamDict['MaxCols'], textvariable=self.columnNum, width = 6)
+        self.ColumnSpin = ttk.Spinbox(frm,  from_=1, to=self.parent.MainParamDict['MaxCols'], textvariable=self.columnNum, width = 6)
         self.ColumnSpin.grid(row =4, column = 1, sticky = Tk.W + Tk.E)
 
         # Make an entry to change the number of columns
@@ -1322,7 +1109,7 @@ class SettingsFrame(Tk.Toplevel):
         self.rowNum.set(self.parent.MainParamDict['NumOfRows']) # default value
         self.rowNum.trace('w', self.RowNumChanged)
         ttk.Label(frm, text="# of rows:").grid(row=5)
-        self.RowSpin = Spinbox(frm, from_=1, to=self.parent.MainParamDict['MaxRows'], textvariable=self.rowNum, width = 6)
+        self.RowSpin = ttk.Spinbox(frm, from_=1, to=self.parent.MainParamDict['MaxRows'], textvariable=self.rowNum, width = 6)
         self.RowSpin.grid(row =5, column = 1, sticky = Tk.W + Tk.E)
 
         self.PrtlStrideVar = Tk.StringVar()
@@ -1719,7 +1506,9 @@ class SettingsFrame(Tk.Toplevel):
             pass
         else:
             self.parent.MainParamDict['2DSlicePlane'] = self.PlaneVar.get()
-            self.parent.RenewCanvas(    )
+            # Which panels share an axis depends on the plane, and a redraw
+            # also retries any panel the last plane could not show.
+            self.parent.RenewCanvas(ForceRedraw = True)
 
 
     def LinkKChanged(self, *args):
@@ -2050,31 +1839,154 @@ class MeasureFrame(Tk.Toplevel):
             self.parent.RenewCanvas()
 
     def OnClosing(self):
-        self.parent.settings_window = None
+        self.parent.measure_window = None
         self.destroy()
 
 
-class MainApp(Tk.Tk):
-    """ We simply derive a new class of Frame as the man frame of our app"""
-    def __init__(self, name,cmd_args):
 
-        Tk.Tk.__init__(self)
-        self.update_idletasks()
-        menubar = Tk.Menu(self)
-        self.wm_title(name)
+class SettingsDock(QtWidgets.QWidget):
+    '''The window beside the figure that the settings panes open in, one tab
+    each. Opening a pane that is already open brings its tab to the front.
+    It is always its own top-level window, so opening or closing it never
+    resizes (and redraws) the figure.'''
+
+    HINT = ('Right-click a panel to change its settings.\n\n'
+            'S opens the general settings.')
+
+    def __init__(self, window):
+        QtWidgets.QWidget.__init__(self, window, Qt.Window)
+        self.setObjectName('SettingsDock')
+        self.setWindowTitle('Settings')
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setDocumentMode(True)
+        self.tabs.setElideMode(Qt.ElideRight)
+        self.tabs.tabCloseRequested.connect(self._close_tab)
+        self.hint = QtWidgets.QLabel(self.HINT)
+        self.hint.setAlignment(Qt.AlignCenter)
+        self.hint.setWordWrap(True)
+        self.hint.setStyleSheet('color: gray; padding: 24px;')
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.addWidget(self.hint)
+        self.stack.addWidget(self.tabs)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.stack)
+        self._pages = {}
+        self._placed = False
+        self._toggle_action = QtGui.QAction('Settings Panel', self)
+        self._toggle_action.setCheckable(True)
+        self._toggle_action.toggled.connect(self.setVisible)
+
+    def toggleViewAction(self):
+        return self._toggle_action
+
+    def showEvent(self, event):
+        if not self._placed:
+            # First time up: open it just to the right of the main window
+            self._placed = True
+            window = self.parent()
+            geom = window.frameGeometry()
+            self.resize(max(self.width(), 360), window.height())
+            self.move(geom.right() + 1, geom.top())
+        self._toggle_action.setChecked(True)
+        QtWidgets.QWidget.showEvent(self, event)
+
+    def hideEvent(self, event):
+        self._toggle_action.setChecked(False)
+        QtWidgets.QWidget.hideEvent(self, event)
+
+    def _page_of(self, top):
+        return self._pages.get(id(top))
+
+    def add(self, top):
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        scroll.setWidget(top.qw)
+        scroll._top = top
+        self._pages[id(top)] = scroll
+        index = self.tabs.addTab(scroll, 'Settings')
+        self.tabs.setCurrentIndex(index)
+        self.stack.setCurrentWidget(self.tabs)
+        was_hidden = not self.isVisible()
+        self.show()
+        self.raise_()
+        # Fit the dock to the pane once it is laid out
+        QtCore.QTimer.singleShot(0, lambda: self._fit(scroll, grow_only = not was_hidden))
+
+    def _fit(self, scroll, grow_only):
+        try:
+            want = scroll.widget().sizeHint().width() + scroll.verticalScrollBar().sizeHint().width() + 8
+        except RuntimeError:
+            return
+        if grow_only and want <= self.width():
+            return
+        self.resize(want, self.height())
+
+    def set_title(self, top, title):
+        scroll = self._page_of(top)
+        if scroll is not None:
+            index = self.tabs.indexOf(scroll)
+            self.tabs.setTabText(index, title.replace(' Settings', '').replace('&', '&&'))
+            self.tabs.setTabToolTip(index, title)
+
+    def show_tab(self, top):
+        scroll = self._page_of(top)
+        if scroll is not None:
+            self.tabs.setCurrentWidget(scroll)
+            self.show()
+
+    def remove(self, top):
+        scroll = self._pages.pop(id(top), None)
+        if scroll is None:
+            return
+        index = self.tabs.indexOf(scroll)
+        if index >= 0:
+            self.tabs.removeTab(index)
+        scroll.takeWidget()
+        scroll.deleteLater()
+        if self.tabs.count() == 0:
+            self.stack.setCurrentWidget(self.hint)
+
+    def _close_tab(self, index):
+        scroll = self.tabs.widget(index)
+        top = getattr(scroll, '_top', None)
+        if top is not None:
+            top._request_close()
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    '''The Qt window that MainApp drives.'''
+
+    def __init__(self, app):
+        QtWidgets.QMainWindow.__init__(self)
+        self.app = app
+
+    def closeEvent(self, event):
+        event.accept()
+        QtWidgets.QApplication.instance().quit()
+
+
+class MainApp:
+    """ The main app of Iseult. It drives the Qt window in self.window, and
+    provides the few Tk-style calls (after, winfo_width, ...) that the
+    panels and older code use."""
+
+    def __init__(self, name, cmd_args):
+        self.window = MainWindow(self)
+        self.window.setWindowTitle(name)
         self.settings_window = None
         self.measure_window = None
         self.preset_window = None
 
-        # Time steps taken from the playback bar are drawn once Tk is idle;
+        # Time steps taken from the playback bar are drawn once Qt is idle;
         # see setKnob and StepInteractively.
         self._defer_step_render = False
         self._pending_step_render = None
 
-
         self.cmd_args = cmd_args
-#        if self.cmd_args.r:
-#            self.iconify()
         # Maps ('horiz'|'vert', physical axis) onto the axes that every later
         # panel with that combination shares its limits with. Rebuilt on every
         # redraw by ReDrawCanvas.
@@ -2088,23 +2000,9 @@ class MainApp(Tk.Tk):
         # a list of cmaps with orange prtl colors
         self.cmaps_with_green = ['viridis', 'Rainbow + White', 'Blue/Green/Red/Yellow', 'Cube YF', 'Linear_L']
 
-
-
-        fileMenu = Tk.Menu(menubar, tearoff=False)
-        self.presetMenu = Tk.Menu(menubar, tearoff=False, postcommand=self.ViewUpdate)
-        menubar.add_cascade(label="File", underline=0, menu=fileMenu)
-        fileMenu.add_command(label= 'Open Directory', command = self.OnOpen, accelerator='Command+o')
-
-        fileMenu.add_command(label="Exit", underline=1,
-                             command=quit, accelerator="Ctrl+Q")
-        fileMenu.add_command(label= 'Save Current State', command = self.OpenSaveDialog)
-        fileMenu.add_command(label= 'Make a Movie', command = self.OpenMovieDialog)
-        fileMenu.add_command(label= 'Reset Session', command = self.ResetSession)
-
-
-        self.bind_all("<Control-q>", self.quit)
-        self.bind_all("<Command-o>", self.OnOpen)
-        self.bind_all("S", self.OpenSettings)
+        # The settings panes open as tabs of their own window beside the figure
+        self.settings_dock = SettingsDock(self.window)
+        Tk.set_window_host(self.settings_dock)
 
         # A list that will keep track of whether a given axes is a colorbar or not:
         self.cbarList = []
@@ -2211,15 +2109,10 @@ class MainApp(Tk.Tk):
 
         # Create the figure
         self.f = Figure(figsize = (2,2), dpi = 100, edgecolor = 'none', facecolor = 'w')
-
-        # a tk.DrawingArea
-
-        self.canvas = FigureCanvasTkAgg(self.f, master=self)
+        self.canvas = IseultCanvas(self.f)
+        self.window.setCentralWidget(self.canvas)
 
         self.GenMainParamDict()
-
-        # now root.geometry() returns valid size/placement
-        self.minsize(self.winfo_width(), self.winfo_height())
         self.geometry(self.MainParamDict['WindowSize'])
 
         if self.MainParamDict['HorizontalCbars']:
@@ -2235,12 +2128,15 @@ class MainApp(Tk.Tk):
 
         # Make the object hold the timestep info
         self.TimeStep = Param(1, minimum=1, maximum=1000)
-        self.playbackbar = PlaybackBar(self, self.TimeStep, canvas = self.canvas)
+        self.playbackbar = PlaybackBar(self, self.TimeStep)
+        self.window.addToolBar(Qt.BottomToolBarArea, self.playbackbar)
 
         # Add the toolbar
-        self.toolbar =  MyCustomToolbar(self.canvas, self)
-        self.toolbar.update()
-        self.canvas._tkcanvas.pack(side=Tk.RIGHT, fill=Tk.BOTH, expand=1)
+        self.toolbar = MyCustomToolbar(self.canvas, self, self.window)
+        self.window.addToolBar(Qt.TopToolBarArea, self.toolbar)
+
+        self.BuildMenus()
+        self.BuildShortcuts()
 
         # Some options to set the way the spectral lines are dashed
         self.dashes_options = [[],[3,1],[5,1],[1,1]]
@@ -2252,35 +2148,114 @@ class MainApp(Tk.Tk):
 
         self.findDir()
 
-
         self.TimeStep.attach(self)
+        self.window.show()
+        # Lay the window out before the first draw, so it is drawn at its real size
+        QtWidgets.QApplication.processEvents()
         self.InitializeCanvas()
 
-        menubar.add_cascade(label='Preset Views', underline=0, menu = self.presetMenu)
-        self.playbackbar.pack(side=Tk.TOP, fill=Tk.BOTH, expand=0)
-        self.update()
-
-
-        self.config(menu=menubar)
-
-        self.bind('<Return>', self.TxtEnter)
-        self.bind('<Left>', self.playbackbar.SkipLeft)
-        self.bind('<Right>', self.playbackbar.SkipRight)
-        self.bind('r', self.playbackbar.OnReload)
-        self.bind('<space>', self.playbackbar.PlayHandler)
         if self.cmd_args.b :
-            self.after(0,self.MakeAMovie('out.mov', 1, -1, 1, 10))
-            self.after(1, self.quit())
-        self.update()
+            self.MakeAMovie('out.mov', 1, -1, 1, 10)
+            sys.exit(0)
+
+    ####
+    #
+    # Menus and keys
+    #
+    ####
+
+    def BuildMenus(self):
+        menubar = self.window.menuBar()
+        def add(menu, text, slot, shortcut=None):
+            action = menu.addAction(text)
+            action.triggered.connect(lambda checked=False: slot())
+            if shortcut is not None:
+                action.setShortcut(QtGui.QKeySequence(shortcut))
+            return action
+
+        fileMenu = menubar.addMenu('&File')
+        add(fileMenu, 'Open Directory…', self.OnOpen, 'Ctrl+O')
+        add(fileMenu, 'Save Current State…', self.OpenSaveDialog, 'Ctrl+S')
+        add(fileMenu, 'Make a Movie…', self.OpenMovieDialog, 'Ctrl+M')
+        add(fileMenu, 'Reset Session', self.ResetSession)
+        fileMenu.addSeparator()
+        add(fileMenu, 'Exit', self.quit, 'Ctrl+Q')
+
+        viewMenu = menubar.addMenu('&View')
+        add(viewMenu, 'General Settings', self.OpenSettings)
+        add(viewMenu, 'FFT Region', self.playbackbar.OpenMeasures)
+        dock_action = self.settings_dock.toggleViewAction()
+        dock_action.setText('Settings Panel')
+        dock_action.setShortcut(QtGui.QKeySequence('Ctrl+E'))
+        viewMenu.addAction(dock_action)
+
+        self.presetMenu = menubar.addMenu('&Preset Views')
+        self.presetMenu.aboutToShow.connect(self.ViewUpdate)
+
+    def BuildShortcuts(self):
+        # Window-wide keys. A text box that uses the key itself (e.g. the
+        # arrows while typing) keeps it; Qt only fires these otherwise.
+        for key, command in [(Qt.Key_Left, self.playbackbar.SkipLeft),
+                             (Qt.Key_Right, self.playbackbar.SkipRight),
+                             (Qt.Key_Space, self.playbackbar.PlayHandler),
+                             (Qt.Key_R, self.playbackbar.OnReload),
+                             (Qt.Key_S, self.OpenSettings)]:
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self.window)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.setAutoRepeat(key in (Qt.Key_Left, Qt.Key_Right))
+            shortcut.activated.connect(command)
+
+    ####
+    #
+    # The Tk-style calls used around Iseult
+    #
+    ####
+
+    def after(self, ms, func=None, *args):
+        if func is None:
+            return None
+        return Tk.after(ms, func, *args)
+
+    def after_idle(self, func, *args):
+        return Tk.after_idle(func, *args)
+
+    def after_cancel(self, timer_id):
+        Tk.after_cancel(timer_id)
+
+    def update(self):
+        QtWidgets.QApplication.processEvents()
+
+    update_idletasks = update
+
+    def winfo_width(self):
+        return self.window.width()
+
+    def winfo_height(self):
+        return self.window.height()
+
+    def geometry(self, size):
+        m = re.match(r'\s*(\d+)x(\d+)', str(size))
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            screen = self.window.screen().availableGeometry()
+            self.window.resize(min(w, screen.width()), min(h, screen.height()))
+
+    def focus_set(self):
+        self.canvas.setFocus()
+
+    def mainloop(self):
+        QtWidgets.QApplication.instance().exec()
+
     def ViewUpdate(self):
         # Rebuilt every time the menu opens so it follows renames, deletions
         # and reordering done in the PresetManager.
         config_dir = os.path.join(self.IseultDir, '.iseult_configs')
-        self.presetMenu.delete(0, Tk.END)
+        self.presetMenu.clear()
         for name, cfile in preset_views.list_presets(config_dir):
-            self.presetMenu.add_command(label = name, command = partial(self.LoadConfig, os.path.join(config_dir, cfile)))
-        self.presetMenu.add_separator()
-        self.presetMenu.add_command(label = 'Manage Presets…', command = self.OpenPresetManager)
+            action = self.presetMenu.addAction(name)
+            action.triggered.connect(partial(lambda path, checked=False: self.LoadConfig(path), os.path.join(config_dir, cfile)))
+        self.presetMenu.addSeparator()
+        self.presetMenu.addAction('Manage Presets…').triggered.connect(lambda checked=False: self.OpenPresetManager())
     def StrideChanged(self):
         # first we have to remove the calculated energy time steps
         self.TotalEnergyTimeSteps = []
@@ -2306,9 +2281,9 @@ class MainApp(Tk.Tk):
                 DataDict.pop(k, None)
 
 
-    def quit(self, event):
+    def quit(self, *args):
         print("quitting...")
-        sys.exit(0)
+        QtWidgets.QApplication.instance().quit()
 
     def GenMainParamDict(self, config_file = None):
         ''' The function that reads in a config file and then makes MainParamDict to hold all of the main iseult parameters.
@@ -2551,10 +2526,10 @@ class MainApp(Tk.Tk):
             self.movie_dir = ''
 
         self.TimeStep.setMax(len(self.PathDict['Flds']))
-        self.playbackbar.slider.config(to =(len(self.PathDict['Flds'])))
+        self.playbackbar.set_max(len(self.PathDict['Flds']))
         if self.MainParamDict['Reload2End']:
             self.TimeStep.value = len(self.PathDict['Flds'])
-            self.playbackbar.slider.set(self.TimeStep.value)
+        self.playbackbar.show_step(self.TimeStep.value)
         self.shock_finder()
 
         return True
@@ -2647,8 +2622,6 @@ class MainApp(Tk.Tk):
 
         # Make a list that will hold the previous ctype
         self.MakePrevCtypeList()
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(side=Tk.TOP, fill=Tk.BOTH, expand=1)
         self.ReDrawCanvas()
         self.f.canvas.mpl_connect('button_press_event', self.onclick)
         self.f.canvas.mpl_connect('button_release_event', self.on_release)
@@ -2697,8 +2670,8 @@ class MainApp(Tk.Tk):
                     # The graph isn't specified in the config file, just set it equal to a phase plot
                     self.SubPlotList[i][j].SetGraph('PhasePlot')
         # There are a few parameters that need to be loaded separately, mainly in the playbackbar.
-        self.playbackbar.RecVar.set(self.MainParamDict['Recording'])
-        self.playbackbar.LoopVar.set(self.MainParamDict['LoopPlayback'])
+        self.playbackbar.set_recording(self.MainParamDict['Recording'])
+        self.playbackbar.set_loop(self.MainParamDict['LoopPlayback'])
 
         # refresh the geometry
         print(self.MainParamDict['WindowSize'])
@@ -2769,6 +2742,7 @@ class MainApp(Tk.Tk):
         filepath = self.PathDict['Flds'][self.TimeStep.value-1]
         bx_shape = data_loading.dataset_shape(filepath, 'bx')
         self.MaxZInd, self.MaxYInd, self.MaxXInd  = np.array(bx_shape) - 1
+        self.flds_shape = tuple(bx_shape)
 
         self.ySlice = int(np.around(self.MainParamDict['ySlice']*self.MaxYInd))
         self.zSlice = int(np.around(self.MainParamDict['zSlice']*self.MaxZInd))
@@ -2809,6 +2783,9 @@ class MainApp(Tk.Tk):
             # For each timestep we visit, we will load a dictionary and place it in a list
             self.ListOfDataDict = []
 
+            # Keys found missing in this directory, so each is warned about once
+            self.missing_keys_warned = set()
+
             self.NewDirectory = False
         # see if one of the plots is the total energy panel
         self.showing_total_energy_plt = False
@@ -2824,7 +2801,11 @@ class MainApp(Tk.Tk):
 
         if self.TimeStep.value in self.timestep_visited:
             cur_ind = self.timestep_visited.index(self.TimeStep.value)
+            # Now the most recently viewed step. Moved in one go, so that a key
+            # that fails to load below cannot leave the step visited but out of
+            # the queue.
             self.timestep_queue.remove(self.TimeStep.value)
+            self.timestep_queue.append(self.TimeStep.value)
             self.DataDict = self.ListOfDataDict[cur_ind]
             for pkey in self.ToLoad.keys():
                 tmplist = list(set(self.ToLoad[pkey])) # get rid of duplicate keys
@@ -2848,40 +2829,7 @@ class MainApp(Tk.Tk):
                                 else:
                                     self.DataDict[elm] = data_loading.load_dataset(filepath, elm)
                             except KeyError:
-                                if elm == 'sizex':
-                                    self.DataDict[elm] = 1
-                                elif elm == 'c':
-                                    self.DataDict[elm]= 0.45
-                                elif elm == 'ppc0':
-                                    self.DataDict[elm] = np.nan
-                                elif elm == 'my':
-                                    istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
-                                    my0   = data_loading.load_dataset(filepath, 'my0', slice(0,1))
-                                    tmpSize = ((self.MaxYInd+1)*istep)//(my0-5)
-                                    self.DataDict[elm] = np.ones(tmpSize)*my0
-                                elif elm == 'mx':
-                                    istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
-                                    mx0   = data_loading.load_dataset(filepath, 'mx0', slice(0,1))
-                                    tmpSize = ((self.MaxXInd+1)*istep)//(mx0-5)
-                                    self.DataDict[elm] = np.ones(tmpSize)*mx0
-                                elif elm in ['v3x', 'v3y', 'v3z', 'v3xi', 'v3yi', 'v3zi']:
-                                    messagebox.showwarning("Missing Data", f"The velocity array '{elm}' was not found in the fields file.\nVelocity plotting is unavailable.")
-                                    for row in range(self.MainParamDict['NumOfRows']):
-                                        for col in range(self.MainParamDict['NumOfCols']):
-                                            subplot = self.SubPlotList[row][col]
-                                            if subplot.chartType == 'FieldsPlot' and subplot.GetPlotParam('field_type') in [4, 5]:
-                                                subplot.SetPlotParam('field_type', 0, update_plot=False)
-                                                if hasattr(subplot, 'settings_window') and subplot.settings_window is not None:
-                                                    subplot.settings_window.FieldTypeVar.set(0)
-                                    self.parent.after(100, self.LoadAllKeys)
-                                    return
-                                elif elm == 'divE':
-                                    print("Warning: divE variable is missing in the file.")
-                                    self.DataDict[elm] = np.nan
-                                else:
-                                    raise
-
-            self.timestep_queue.append(self.TimeStep.value)
+                                self.DataDict[elm] = self.MissingKey(filepath, elm)
 
         else:
             # The time has not already been visited so we have to reload everything
@@ -2902,38 +2850,7 @@ class MainApp(Tk.Tk):
                                 else:
                                     self.DataDict[elm] = data_loading.load_dataset(filepath, elm, cli_args=self.cmd_args)
                             except KeyError:
-                                if elm == 'sizex':
-                                    self.DataDict[elm] = 1
-                                elif elm == 'c':
-                                    self.DataDict[elm]= 0.45
-                                elif elm == 'ppc0':
-                                    self.DataDict[elm] = np.nan
-                                elif elm == 'my':
-                                    istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
-                                    my0   = data_loading.load_dataset(filepath, 'my0', slice(0,1))
-                                    tmpSize = ((self.MaxYInd+1)*istep)//(my0-5)
-                                    self.DataDict[elm] = np.ones(tmpSize)*my0
-                                elif elm == 'mx':
-                                    istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
-                                    mx0   = data_loading.load_dataset(filepath, 'mx0', slice(0,1))
-                                    tmpSize = ((self.MaxXInd+1)*istep)//(mx0-5)
-                                    self.DataDict[elm] = np.ones(tmpSize)*mx0
-                                elif elm in ['v3x', 'v3y', 'v3z', 'v3xi', 'v3yi', 'v3zi']:
-                                    messagebox.showwarning("Missing Data", f"The velocity array '{elm}' was not found in the fields file.\nVelocity plotting is unavailable.")
-                                    for row in range(self.MainParamDict['NumOfRows']):
-                                        for col in range(self.MainParamDict['NumOfCols']):
-                                            subplot = self.SubPlotList[row][col]
-                                            if subplot.chartType == 'FieldsPlot' and subplot.GetPlotParam('field_type') in [4, 5]:
-                                                subplot.SetPlotParam('field_type', 0, update_plot=False)
-                                                if hasattr(subplot, 'settings_window') and subplot.settings_window is not None:
-                                                    subplot.settings_window.FieldTypeVar.set(0)
-                                    self.parent.after(100, self.LoadAllKeys)
-                                    return
-                                elif elm == 'divE':
-                                    print("Warning: divE variable is missing in the file.")
-                                    self.DataDict[elm] = np.nan
-                                else:
-                                    raise
+                                self.DataDict[elm] = self.MissingKey(filepath, elm)
 
             # don't keep more than 30 time steps in memory because of RAM issues
             if len(self.timestep_visited)>30:
@@ -3026,7 +2943,9 @@ class MainApp(Tk.Tk):
             if not 'shock_loc' in self.DataDict.keys():
                 # Have to figure out where the shock is
 
-                jstart = int(min(10*self.DataDict['c_omp']/self.DataDict['istep'], self.DataDict['dens'][0,:,:].shape[1]))
+                # Leave at least one column to look in, however narrow the grid
+                jstart = int(min(10*self.DataDict['c_omp']/self.DataDict['istep'], self.DataDict['dens'][0,:,:].shape[1]-1))
+                jstart = max(jstart, 0)
                 cur_xaxis = np.arange(self.DataDict['dens'][0,:,:].shape[1])/self.DataDict['c_omp']*self.DataDict['istep']
                 # Find the shock by seeing where the density is 1/2 of it's
                 # max value.
@@ -3060,6 +2979,37 @@ class MainApp(Tk.Tk):
         for i in range(self.MainParamDict['NumOfRows']):
             for j in range(self.MainParamDict['NumOfCols']):
                 self.SubPlotList[i][j].LoadData()
+
+    def MissingKey(self, filepath, elm):
+        '''A stand-in for `elm`, which is not in the file at `filepath`.
+        Raises the KeyError again if there is no sensible stand-in.'''
+        if elm == 'sizex':
+            return 1
+        elif elm == 'c':
+            return 0.45
+        elif elm == 'ppc0':
+            return np.nan
+        elif elm == 'my':
+            istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
+            my0   = data_loading.load_dataset(filepath, 'my0', slice(0,1))
+            tmpSize = ((self.MaxYInd+1)*istep)//(my0-5)
+            return np.ones(tmpSize)*my0
+        elif elm == 'mx':
+            istep = data_loading.load_dataset(filepath, 'istep', slice(0,1))
+            mx0   = data_loading.load_dataset(filepath, 'mx0', slice(0,1))
+            tmpSize = ((self.MaxXInd+1)*istep)//(mx0-5)
+            return np.ones(tmpSize)*mx0
+        elif elm in ['v3x', 'v3y', 'v3z', 'v3xi', 'v3yi', 'v3zi', 'divE']:
+            # Shown as zeros, so the panels asking for it can still be drawn
+            what = 'divE' if elm == 'divE' else 'velocity'
+            if what not in self.missing_keys_warned:
+                self.missing_keys_warned.add(what)
+                name = 'The divergence of E (divE)' if what == 'divE' else f'The velocity array \'{elm}\''
+                message = f'{name} is not in the fields files, so it is shown as zero.'
+                print('Warning: ' + message)
+                self.after(0, lambda: messagebox.showwarning('Missing Data', message))
+            return np.zeros(self.flds_shape)
+        raise KeyError(elm)
 
     def RefreshTimeStep(self):
         ''' A function that will find out will arrays need to be loaded for
@@ -3733,9 +3683,9 @@ class MainApp(Tk.Tk):
             self.movie_dir = filedialog.askdirectory(title = 'Please choose a different directory where you have write access to save images.', **self.dir_opt)
             return True
         else:
-            return False
             self.MainParamDict['Recording'] = False
-            self.playbackbar.RecVar.set(False)
+            self.playbackbar.set_recording(False)
+            return False
 
     def MakeAMovie(self, fname, start, stop, step, FPS, outdir = os.curdir, dpi = None):
         '''Record a movie of frames start to stop (inclusive), every step-th
@@ -3759,11 +3709,24 @@ class MainApp(Tk.Tk):
 
         outpath = os.path.join(outdir, fname)
         print(f'Writing {len(frame_arr)} frames to {outpath}')
-        with movie_writer.MovieWriter(outpath, FPS) as movie:
-            for i in frame_arr:
-                self.TimeStep.set(i)
-                movie.write(movie_writer.render_frame(self.f, dpi))
-                print(f"saved frame {i}")
+        progress = QtWidgets.QProgressDialog(f'Writing {outpath}', 'Stop', 0, len(frame_arr), self.window)
+        progress.setWindowTitle('Making a Movie')
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        try:
+            with movie_writer.MovieWriter(outpath, FPS) as movie:
+                for n, i in enumerate(frame_arr):
+                    if progress.wasCanceled():
+                        print('Movie stopped early')
+                        break
+                    self.TimeStep.set(i)
+                    movie.write(movie_writer.render_frame(self.f, dpi))
+                    print(f"saved frame {i}")
+                    progress.setValue(n + 1)
+                    QtWidgets.QApplication.processEvents()
+        finally:
+            progress.close()
+            self.playbackbar.show_step(self.TimeStep.value)
 
     def OpenSaveDialog(self):
         SaveDialog(self)
@@ -4083,8 +4046,13 @@ class MainApp(Tk.Tk):
         filepath = self.PathDict['Flds'][0]
         nxf0 = data_loading.dataset_shape(filepath, 'by')[1]
         if np.isnan(self.btheta):
+            # No known background field (an unmagnetized run, or data that
+            # does not record btheta): fields are shown unnormalized, and
+            # changes in them are measured from zero.
             self.b0 = 1.0
             self.e0 = 1.0
+            self.bx0 = self.by0 = self.bz0 = 0.0
+            self.ex0 = self.ey0 = self.ez0 = 0.0
         else:
             # Normalize by b0
             b_slice = (slice(0,1),slice(-1,None),slice(-10,-9))
@@ -4134,41 +4102,19 @@ class MainApp(Tk.Tk):
 
     def setKnob(self, value):
         # If the time parameter changes update the plots
-        """
-        if self.playbackbar.playPressed and not self.MainParamDict['Recording']:
-            already_saved = False
-            if self.TimeStep.value in self.SavedHashes.keys(): # we have already saved an image for this TimeStep
-                # is the current state of Iseult equal to the state when we saved said image?
-                already_saved = self.SavedHashes[self.TimeStep.value] ==  self.StateHash
-
-            if not already_saved:
-                self.RenewCanvas()
-
-            im = Image.frombuffer('RGBA', self.SavedImgSize[self.TimeStep.value], self.SavedImgStr[self.TimeStep.value], 'raw', 'RGBA', 0, 1)
-            self.MovieIm.set_data(im)
-            self.MovieCanvas.draw()
-#            self.MovieCanvas.get_tk_widget().update_idletasks()
-            self.playbackbar.tstep.set(str(value))
-            #set the slider
-            self.playbackbar.slider.set(value)
-
-
-        else:
-        """
         if self._defer_step_render and not self.MainParamDict['Recording']:
-            # Stepped from the playback bar: draw once Tk is idle, by which
+            # Stepped from the playback bar: draw once Qt is idle, by which
             # time any further steps already queued (e.g. from a held arrow
             # key) have been taken, so only the step the user ends up on is
             # loaded and drawn. While recording, every step is drawn so that
             # every step is saved.
             if self._pending_step_render is None:
                 self._pending_step_render = self.after_idle(self._RenderPendingStep)
+            # Show the step now; it is drawn once Qt is idle
+            self.playbackbar.show_step(value)
         else:
+            self.playbackbar.show_step(value)
             self.RenewCanvas()
-
-        self.playbackbar.tstep.set(str(value))
-        #set the slider
-        self.playbackbar.slider.set(value)
 
     def StepInteractively(self, change_step):
         '''Call change_step, which sets self.TimeStep, deferring the redraw
@@ -4191,53 +4137,14 @@ class MainApp(Tk.Tk):
             self.settings_window.destroy()
             self.settings_window = SettingsFrame(self)
 
-    def TxtEnter(self, e):
-        self.playbackbar.TextCallback()
 
 def runMe(cmd_args):
+    qapp = Tk.ensure_app()
+    qapp.setApplicationName('Iseult')
+    # A flat style with no animations: quick to draw, and cheap to send over VNC
+    qapp.setStyle('Fusion')
+    for effect in (Qt.UI_AnimateMenu, Qt.UI_FadeMenu, Qt.UI_AnimateCombo,
+                   Qt.UI_AnimateTooltip, Qt.UI_FadeTooltip, Qt.UI_AnimateToolBox):
+        qapp.setEffectEnabled(effect, False)
     app = MainApp('Iseult', cmd_args)
     app.mainloop()
-"""
-    parser = argparse.ArgumentParser(description='Plotting program for Tristan-MP files.')
-    #        parser.add_argument('integers', metavar='N', type=int, nargs='+',
-    #                        help='The maximum file number to consider')
-    #        parser.add_argument('--foo', nargs='?', const='c', default='d')
-    #        parser.add_argument('bar', nargs='?', default='d')
-    parser.add_argument('-n', nargs = '?',# dest='accumulate', action='store_const',
-                        const=-1, default=-1,
-                        help='Maximum file # to consider')
-
-    parser.add_argument('-O', nargs = '?',# dest='accumulate', action='store_const',
-                        const='', default='',
-                        help='Directory Iseult will open. Default is output')
-
-    parser.add_argument('-p', nargs = '?',# dest='accumulate', action='store_const',
-                        const='Default', default='Default',
-                        help='''Open Iseult with the given saved view.
-                              If the name of view contains whitespace,
-                              either it must be enclosed in quotation marks or given
-                              with whitespace removed. Name is case sensitive.''')
-    parser.add_argument("-b", help="Run Iseult from bash script. Makes a movie.",
-                        action="store_true")
-
-    #parser.add_argument("--wait", help="Wait until current simulation is finished before making movie.",
-    #                    action="store_true")
-
-    cmd_args = parser.parse_args()
-    #import sys
-    #if cmd_args.wait:
-    #    " try to parse stdin"
-    #    slurm_num = sys.stdin.read().split[-1]
-    #    print(slurm_num)
-    #    num = 0
-    #    done = False
-    #    while num < 2000 and not done:
-    #        slurm_queue = subprocess.check_output(["squeue"]    )
-    #        if slurm_queue.find(slurm_num) != -1:
-    #            num += 1
-    #            time.sleep(3E5)
-    app = MainApp('Iseult', cmd_args)
-
-
-    app.mainloop()
-"""

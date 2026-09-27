@@ -26,7 +26,7 @@ MAIN_APP = pathlib.Path(__file__).resolve().parents[1] / 'src' / 'main_app.py'
 def _view_mixin():
     '''SaveView and LoadView, lifted out of main_app.
 
-    main_app cannot be imported here: it selects the TkAgg backend at import
+    main_app cannot be imported here: it selects the QtAgg backend at import
     time, which needs a display. The two methods themselves only touch the
     toolbar and the panel list, so they are read out of the file and given a
     class of their own to live in.'''

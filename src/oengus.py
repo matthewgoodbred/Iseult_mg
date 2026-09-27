@@ -132,8 +132,11 @@ class Oengus():
         o = self.sim[0]
         nxf0 = o.by.shape[1]
         if np.isnan(self.btheta):
+            # No known background field: see MainApp.shock_finder
             self.b0 = 1.0
             self.e0 = 1.0
+            self.bx0 = self.by0 = self.bz0 = 0.0
+            self.ex0 = self.ey0 = self.ez0 = 0.0
         else:
             # Normalize by b0
             self.bx0 = o.bx[0,-1,-10]

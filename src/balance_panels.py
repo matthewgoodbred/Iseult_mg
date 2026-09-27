@@ -14,8 +14,8 @@ The physics, and the units, are described in `fluid_balance`.
 """
 import time
 from collections import OrderedDict
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 
 import matplotlib
 import matplotlib.gridspec as gridspec

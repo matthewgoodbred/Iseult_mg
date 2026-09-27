@@ -2,7 +2,7 @@
 """This file contains the functions to control and generate the arrow vector overlays.
 """
 
-import tkinter as Tk
+import qt_compat as Tk
 import numpy as np
 import plot_axes
 import matplotlib

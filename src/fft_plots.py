@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma
@@ -154,7 +154,15 @@ class FFTPanel:
 
 
     def LimFinder(self, arr):
+        # Only finite values count: e.g. the Stokes chi is NaN wherever the
+        # power is zero. With none, or all equal, still give usable limits.
+        arr = np.asarray(arr)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return [0.0, 1.0]
         oneD_lims = [arr.min(), arr.max()]
+        if oneD_lims[0] == oneD_lims[1]:
+            oneD_lims = [oneD_lims[0] - 0.5, oneD_lims[1] + 0.5]
         # now give it a bit of spacing, a 4% percent difference of the distance
         dist = oneD_lims[1]-oneD_lims[0]
         oneD_lims[0] -= 0.04*dist

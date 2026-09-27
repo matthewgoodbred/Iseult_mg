@@ -1,6 +1,6 @@
 #!/usr/bin/env pythonw
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma
@@ -11,6 +11,19 @@ import matplotlib.patheffects as PathEffects
 from scipy.special import kn # Modified Bessel function
 from scipy.stats import linregress
 from scipy.integrate import cumulative_trapezoid
+def fit_range(dist, left, right, tol):
+    """The indices [left, right) of `dist` to fit a power law over, moved
+    inwards past bins where it is zero. searchsorted can put either one past
+    the end of `dist`."""
+    last = len(dist) - 1
+    left, right = min(left, last), min(right, last)
+    while left < last and np.abs(dist[left]) <= tol:
+        left += 1
+    while right > 0 and np.abs(dist[right]) <= tol:
+        right -= 1
+    return left, right
+
+
 class SpectralPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
 
@@ -389,10 +402,7 @@ class SpectralPanel:
                     impRight = self.momentum.searchsorted(mompright, side='Right')
 
                     # a while loop to make sure that the program won't mess up if mompdist == 0
-                    while np.abs(self.mompdist[impLeft]) <= 1E-10 and impLeft < len(self.mompdist)-1:
-                        impLeft += 1
-                    while np.abs(self.mompdist[impRight]) <= 1E-10 and impRight > 0:
-                        impRight -=1
+                    impLeft, impRight = fit_range(self.mompdist, impLeft, impRight, 1E-10)
 
                     if impRight>impLeft:
                         self.pslope, self.pintercept, pr_value, pp_value, pstderr = linregress(np.log(self.momentum[impLeft:impRight]), np.log(self.mompdist[impLeft:impRight]))
@@ -447,11 +457,7 @@ class SpectralPanel:
                     imeRight = self.momentum.searchsorted(momeright, side='Right')
 
                     # a while loop to make sure that the program won't mess up if momedist == 0
-                    while np.abs(self.momedist[imeLeft]) <= 1E-14 and imeLeft < len(self.momedist)-1:
-                        imeLeft += 1
-
-                    while np.abs(self.momedist[imeRight]) <= 1E-14 and imeRight > 0:
-                        imeRight -=1
+                    imeLeft, imeRight = fit_range(self.momedist, imeLeft, imeRight, 1E-14)
 
 
                     if imeRight>imeLeft:
@@ -520,11 +526,7 @@ class SpectralPanel:
                     if ieRight == len(self.gamma):
                         ieRight -= 1
                     # a while loop to make sure that the program won't mess up if momedist == 0
-                    while np.abs(self.edist[ieLeft]) <= 1E-14 and ieLeft < len(self.edist)-1:
-                        ieLeft += 1
-
-                    while np.abs(self.edist[ieRight]) <= 1E-14 and ieRight > 0:
-                        ieRight -=1
+                    ieLeft, ieRight = fit_range(self.edist, ieLeft, ieRight, 1E-14)
 
                     if ieRight>ieLeft:
                         self.eslope, self.eintercept, er_value, ep_value, estderr = linregress(np.log(self.gamma[ieLeft:ieRight]), np.log(self.edist[ieLeft:ieRight]))
@@ -571,15 +573,8 @@ class SpectralPanel:
                     iepLeft = self.gamma.searchsorted(self.GetPlotParam('PowerLawIonMin'))
                     iepRight = self.gamma.searchsorted(self.GetPlotParam('PowerLawIonMax'), side='Right')
 
-                    if iepLeft == len(self.gamma):
-                        iepLeft -= 1
-                    if iepRight == len(self.gamma):
-                        iepRight -=1
                     # a while loop to make sure that the program won't mess up if mompdist == 0
-                    while np.abs(self.pdist[iepLeft]) <= 1E-14 and iepLeft < len(self.pdist)-1:
-                        iepLeft += 1
-                    while np.abs(self.pdist[iepRight]) <= 1E-14 and iepRight > 0:
-                        iepRight -=1
+                    iepLeft, iepRight = fit_range(self.pdist, iepLeft, iepRight, 1E-14)
 
                     if iepRight>iepLeft:
                         self.pslope, self.pintercept, per_value, pep_value, pestderr = linregress(np.log(self.gamma[iepLeft:iepRight]), np.log(self.pdist[iepLeft:iepRight]))

@@ -1,6 +1,6 @@
 #!/usr/bin/env pythonw
-import tkinter as Tk
-from tkinter import ttk
+import qt_compat as Tk
+from qt_compat import ttk
 import matplotlib
 import numpy as np
 import numpy.ma as ma
@@ -113,7 +113,7 @@ class EnergyPanel:
 
         # CLOSES IF. NOW IF WE TURN OFF THE INTEGRATION REGIONS, we have to delete all the lines.
         else:
-            for i in xrange(len(self.IntRegionLines)):
+            for i in range(len(self.IntRegionLines)):
                 self.IntRegionLines.pop(0).remove()
         # Update the canvas
         self.parent.canvas.draw_idle()
