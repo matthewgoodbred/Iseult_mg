@@ -5,6 +5,7 @@ import matplotlib
 import numpy as np
 import numpy.ma as ma
 import new_cmaps
+import plot_axes
 import matplotlib.colors as mcolors
 import matplotlib.gridspec as gridspec
 import matplotlib.patheffects as PathEffects
@@ -74,7 +75,10 @@ class FFTPanel:
 
 
         # A list that will make sure that the data has the same int region
-        self.region_args = list([self.left_loc, self.right_loc])
+        # The FFTs are of lineouts along x, taken across the 2D view as all
+        # the other lineouts are, so the region includes where they are cut.
+        window = plot_axes.lineout_window(self, 'x')
+        self.region_args = list([self.left_loc, self.right_loc] + [i for axis in 'yz' for i in window[axis]])
         # Check if the region is the same in the DataDict
         is_loaded = False
         if 'FFTs' in self.parent.DataDict.keys():
@@ -93,23 +97,22 @@ class FFTPanel:
             # Calculate K_axis
             self.k_axis = np.arange(iR-iL)*(2*np.pi/(self.xaxis_values[1]-self.xaxis_values[0]))/(iR-iL)-(2*np.pi/(self.xaxis_values[1]-self.xaxis_values[0]))*.5
             # Calculate all of the FFTs, just simpler to do it this way...
-            bz = self.FigWrap.LoadKey('bz')[0,:,:]
+            bz = plot_axes.lineout(self, self.FigWrap.LoadKey('bz'), 'x')
 
-            self.BzFFT = np.fft.fft(bz[self.parent.ySlice,iL:iR]*self.parent.b0**(-1.0))
+            self.BzFFT = np.fft.fft(bz[iL:iR]*self.parent.b0**(-1.0))
             # Shift the fft so it is centered
             self.BzFFT = np.fft.fftshift(self.BzFFT)
             self.all_min_max.append(self.LimFinder(np.abs(self.BzFFT)))
 
-            bx = self.FigWrap.LoadKey('bx')[0,:,:]
-            by = self.FigWrap.LoadKey('by')[0,:,:]
+            by = plot_axes.lineout(self, self.FigWrap.LoadKey('by'), 'x')
             b_perp_in_plane = by*self.parent.b0**(-1.0)
-            self.BperpFFT = np.fft.fft(b_perp_in_plane[self.parent.ySlice,iL:iR])
+            self.BperpFFT = np.fft.fft(b_perp_in_plane[iL:iR])
             # Shift the fft so it is centered
             self.BperpFFT = np.fft.fftshift(self.BperpFFT)
 
             self.all_min_max.append(self.LimFinder(np.abs(self.BperpFFT)))
-            ex = self.FigWrap.LoadKey('ex')[0,:,:]
-            self.ExFFT = np.fft.fft(ex[self.parent.ySlice,iL:iR]*self.parent.e0**(-1.0))
+            ex = plot_axes.lineout(self, self.FigWrap.LoadKey('ex'), 'x')
+            self.ExFFT = np.fft.fft(ex[iL:iR]*self.parent.e0**(-1.0))
             self.ExFFT = np.fft.fftshift(self.ExFFT)
             self.all_min_max.append(self.LimFinder(np.abs(self.ExFFT)))
 

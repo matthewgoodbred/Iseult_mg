@@ -35,9 +35,10 @@ class  MomentsPanel:
     plot_param_dict = {'twoD': 0,
                        'm_type': 0, # Which quantity; an index into stress_energy.FAMILIES:
                                     # 0 = 3-velocity, 1 = 4-velocity, 2 = energy, 3 = stress-energy tensor,
-                                    # 4 = rest-frame pressure tensor, 5 = rest-frame temperature tensor
+                                    # 4 = rest-frame pressure tensor, 5 = rest-frame temperature tensor,
+                                    # 6 = 4-velocity of the rest frame
                        'basis': 0, # 0 = lab x, y, z; 1 = parallel/perpendicular to the local B
-                       'rest_frame': 0, # Rest-frame pressure & temperature only, an index into
+                       'rest_frame': 0, # Rest-frame quantities only, an index into
                                         # stress_energy.FRAMES: 0 = Eckart, 1 = Landau
                        'components': '', # Comma separated component names, see stress_energy.components.
                                          # Empty means use the old show_x/y/z flags; 'none' means none.
@@ -108,7 +109,7 @@ class  MomentsPanel:
     ####
 
     def family(self):
-        '''The quantity being shown: 'beta', 'u', 'energy' or 'T'.'''
+        '''The quantity being shown, one of stress_energy.FAMILIES.'''
         m_type = self.GetPlotParam('m_type')
         return se.FAMILIES[m_type] if 0 <= m_type < len(se.FAMILIES) else se.FAMILIES[0]
 
@@ -154,12 +155,14 @@ class  MomentsPanel:
         return [i for i, key in enumerate(keys) if self.GetPlotParam(key)]
 
     def rest_frame(self):
-        '''The rest frame of the rest-frame pressure and temperature: 'eckart' or 'landau'.'''
+        '''The rest frame of the rest-frame quantities: 'eckart' or 'landau'.'''
         return se.FRAMES[1] if self.GetPlotParam('rest_frame') else se.FRAMES[0]
 
     def per_volume(self):
         '''Whether the quantity shown is a density, which needs the bin volume and ppc0.'''
         family = self.family()
+        if family in se.REST_FRAME_FAMILIES and 'n_rest' in self.selected_components():
+            return True
         return family == 'P' or (family == 'T' and self.GetPlotParam('normalization') == 0)
 
     def needs_field(self):
@@ -522,6 +525,8 @@ class  MomentsPanel:
         if family == 'energy':
             comps = self.selected_components()
             return '' if comps == ['gamma_bulk'] else r'%s c^2' % m
+        if family in se.REST_FRAME_FAMILIES and self.selected_components() == ['n_rest']:
+            return r'n_0' if self.has_ppc0 else r'1\ /\ {\rm cell}'
         if family == 'Theta':
             return r'%s c^2' % m
         if family in ('T', 'P'):
@@ -543,13 +548,14 @@ class  MomentsPanel:
                     'energy': r'E',
                     'T': r'T^{\mu\nu}',
                     'P': r'P_{ij}',
-                    'Theta': r'\Theta_{ij}'}[family]
+                    'Theta': r'\Theta_{ij}',
+                    'U': r'U^\mu'}[family]
         units = self.units_tex()
         return '$' + body + (r'\ [' + units + ']' if units else '') + '$' + self.frame_suffix()
 
     def frame_suffix(self):
         '''Which rest frame a rest-frame quantity is in, for a label.'''
-        if self.family() not in se.REST_FRAME_FAMILIES:
+        if self.family() not in se.FRAME_FAMILIES:
             return ''
         return '  (' + self.rest_frame().capitalize() + ')'
 
@@ -936,13 +942,15 @@ class MomentsSettings(Tk.Toplevel):
         self.FamilyVar = Tk.IntVar(self)
         self.FamilyVar.set(self.parent.GetPlotParam('m_type'))
         # Laid out in the order that reads naturally, keeping the legacy m_type values
-        for pos, family in enumerate(('beta', 'u', 'T', 'energy', 'P', 'Theta')):
+        families = ('beta', 'u', 'T', 'energy', 'P', 'Theta', 'U')
+        for pos, family in enumerate(families):
             ttk.Radiobutton(box, text = se.FAMILY_NAMES[family], variable = self.FamilyVar,
                             value = se.FAMILIES.index(family),
                             command = self.FamilyChanged).grid(row = pos // 2, column = pos % 2, sticky = Tk.W, padx = (0, 12))
 
         basis_row = ttk.Frame(box)
-        basis_row.grid(row = 3, column = 0, columnspan = 2, sticky = Tk.W, pady = (4, 0))
+        rows = (len(families) + 1) // 2
+        basis_row.grid(row = rows, column = 0, columnspan = 2, sticky = Tk.W, pady = (4, 0))
         ttk.Label(basis_row, text = 'Basis:').pack(side = Tk.LEFT)
         self.BasisVar = Tk.IntVar(self)
         self.BasisVar.set(self.parent.GetPlotParam('basis'))
@@ -953,9 +961,9 @@ class MomentsSettings(Tk.Toplevel):
             rb.pack(side = Tk.LEFT, padx = (4, 4))
             rb.state(state)
 
-        if self.parent.family() in se.REST_FRAME_FAMILIES:
+        if self.parent.family() in se.FRAME_FAMILIES:
             frame_row = ttk.Frame(box)
-            frame_row.grid(row = 4, column = 0, columnspan = 2, sticky = Tk.W, pady = (2, 0))
+            frame_row.grid(row = rows + 1, column = 0, columnspan = 2, sticky = Tk.W, pady = (2, 0))
             ttk.Label(frame_row, text = 'Rest frame:').pack(side = Tk.LEFT)
             self.FrameVar = Tk.IntVar(self)
             self.FrameVar.set(self.parent.GetPlotParam('rest_frame'))
@@ -1028,7 +1036,10 @@ class MomentsSettings(Tk.Toplevel):
             line.grid(row = 0, column = 0, sticky = Tk.W)
             for comp in se.components(family, basis):
                 widget(line, comp).pack(side = Tk.LEFT, padx = (0, 8))
-            if basis == 'fa' and family != 'energy':
+            if basis == 'fa' and family == 'U':
+                ttk.Label(box, text = '∥ is along the bin\'s mean B;  |⊥| is the magnitude across it',
+                          foreground = 'gray35').grid(row = 1, column = 0, sticky = Tk.W)
+            elif basis == 'fa' and family != 'energy':
                 ttk.Label(box, text = '|⊥| is the magnitude of the mean perpendicular vector, '
                                       'e.g. the E×B drift', foreground = 'gray35').grid(row = 1, column = 0, sticky = Tk.W)
 

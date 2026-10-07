@@ -19,66 +19,91 @@ import pytest
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / 'src'))
 
 from view_state import view_limits, view_from_limits
+import plot_axes
 
 MAIN_APP = pathlib.Path(__file__).resolve().parents[1] / 'src' / 'main_app.py'
 
 
+def _method_source(lines, name):
+    first = next(i for i, l in enumerate(lines) if l.strip().startswith('def %s(' % name))
+    indent = len(lines[first]) - len(lines[first].lstrip())
+    last = next(i for i, l in enumerate(lines)
+                if i > first and l.strip() and len(l) - len(l.lstrip()) <= indent)
+    return lines[first:last]
+
+
 def _view_mixin():
-    '''SaveView and LoadView, lifted out of main_app.
+    '''SaveView, LoadView and MakePrevCtypeList, lifted out of main_app.
 
     main_app cannot be imported here: it selects the QtAgg backend at import
-    time, which needs a display. The two methods themselves only touch the
+    time, which needs a display. The methods themselves only touch the
     toolbar and the panel list, so they are read out of the file and given a
     class of their own to live in.'''
     lines = MAIN_APP.read_text().split('\n')
-    first = next(i for i, l in enumerate(lines) if l.strip().startswith('def SaveView'))
-    last = next(i for i, l in enumerate(lines)
-                if i > first and l.strip().startswith('def RenewCanvas'))
-    namespace = {'view_limits': view_limits, 'view_from_limits': view_from_limits}
-    exec('class ViewMixin:\n' + '\n'.join(lines[first:last]), namespace)
+    body = []
+    for name in ('MakePrevCtypeList', 'SaveView', 'LoadView'):
+        body += _method_source(lines, name)
+    namespace = {'view_limits': view_limits, 'view_from_limits': view_from_limits,
+                 'plot_axes': plot_axes}
+    exec('class ViewMixin:\n' + '\n'.join(body), namespace)
     return namespace['ViewMixin']
 
 
 class FakeGraph:
-    def __init__(self, axes):
+    def __init__(self, axes, axis_names):
         self.axes = axes
+        self.axis_names = axis_names
+
+    def spatial_plot_axes(self):
+        return self.axis_names
 
 
 class FakeSubPlot:
-    chartType = 'FieldsPlot'
-
-    def __init__(self):
+    def __init__(self, chartType = 'FieldsPlot', twoD = True, axis_names = ('x', 'y')):
+        self.chartType = chartType
+        self.twoD = twoD
+        self.axis_names = axis_names
         self.graph = None
+        self.draw_failed = False
         self.Changedto1D = False
         self.Changedto2D = False
-        self.PlotParamsDict = {'FieldsPlot': {'spatial_x': True}}
+
+    def GetPlotParam(self, key):
+        assert key == 'twoD'
+        return int(self.twoD)
 
 
 class FakeApp(_view_mixin()):
-    '''One panel showing a domain that runs from 0 to 100 in both directions.'''
+    '''A row of panels, each showing a domain that runs from 0 to 100 in both directions.'''
 
     DOMAIN = (0.0, 100.0, 0.0, 100.0)
 
-    def __init__(self):
-        self.MainParamDict = {'NumOfRows': 1, 'NumOfCols': 1, 'xLimsRelative': 0}
+    def __init__(self, panels = None):
+        self.panels = panels or [FakeSubPlot()]
+        self.MainParamDict = {'NumOfRows': 1, 'NumOfCols': len(self.panels), 'xLimsRelative': 0}
         self.f = plt.figure()
         self.toolbar = NavigationToolbar2(self.f.canvas)
         self.cbarList = []
         self.shock_loc = 0.0
         self.prev_shock_loc = 0.0
-        self.SubPlotList = [[FakeSubPlot()]]
-        self.prev_ctype_list = [['FieldsPlot']]
+        self.SubPlotList = [self.panels]
         self.diff_from_home = []
         # What the panels would frame if nobody had zoomed, i.e. what they set
         # from the data of the timestep they are showing.
         self.panel_limits = FakeApp.DOMAIN
         self._draw_panels()
+        self.MakePrevCtypeList()
+
+    def ShouldLinkSpatial(self, subplot):
+        return True
 
     def _draw_panels(self):
-        axes = self.f.add_subplot(111)
-        axes.plot([0, 100], [0, 100])
-        self._frame_domain(axes)
-        self.SubPlotList[0][0].graph = FakeGraph(axes)
+        self.MainParamDict['NumOfCols'] = len(self.panels)
+        for j, panel in enumerate(self.panels):
+            axes = self.f.add_subplot(1, len(self.panels), j+1)
+            axes.plot([0, 100], [0, 100])
+            self._frame_domain(axes)
+            panel.graph = FakeGraph(axes, panel.axis_names)
 
     def _frame_domain(self, axes):
         '''What a panel's own draw() or refresh() does: frame its own data.'''
@@ -87,10 +112,11 @@ class FakeApp(_view_mixin()):
 
     @property
     def axes(self):
-        return self.SubPlotList[0][0].graph.axes
+        return self.panels[0].graph.axes
 
-    def limits(self):
-        return tuple(float(v) for v in self.axes.get_xlim() + self.axes.get_ylim())
+    def limits(self, k = 0):
+        axes = self.panels[k].graph.axes
+        return tuple(float(v) for v in axes.get_xlim() + axes.get_ylim())
 
     def redraw(self):
         '''The essentials of ReDrawCanvas(keep_view = True).
@@ -106,6 +132,7 @@ class FakeApp(_view_mixin()):
         self.cbarList = []
         self._draw_panels()
         self.LoadView()
+        self.MakePrevCtypeList()
         return self.limits()
 
     def refresh(self):
@@ -117,16 +144,19 @@ class FakeApp(_view_mixin()):
             return None
         self.SaveView()
         self.toolbar._nav_stack.clear()
-        self._frame_domain(self.axes)
+        for panel in self.panels:
+            self._frame_domain(panel.graph.axes)
         self.LoadView()
+        self.MakePrevCtypeList()
         return self.limits()
 
-    def zoom(self, xlim, ylim):
+    def zoom(self, xlim, ylim, k = 0):
         '''Zoom the way the toolbar's rubber band does, stack and all.'''
         if self.toolbar._nav_stack() is None:
             self.toolbar.push_current() # press_zoom records where we came from
-        self.axes.set_xlim(*xlim)
-        self.axes.set_ylim(*ylim)
+        axes = self.panels[k].graph.axes
+        axes.set_xlim(*xlim)
+        axes.set_ylim(*ylim)
         self.toolbar.push_current() # release_zoom records where we ended up
 
 
@@ -194,3 +224,39 @@ def test_view_from_limits_turns_off_autoscale_only_where_the_user_zoomed():
     assert rebuilt['autoscalex_on'] is False
     assert rebuilt['autoscaley_on'] is True
     assert view['xlim'] == (0, 1) # the view passed in is left alone
+
+
+def test_adding_a_2d_panel_keeps_both_axes_of_the_viewport():
+    app = FakeApp([FakeSubPlot()])
+    app.zoom((20, 30), (40, 50))
+    # A new 2D panel joins the row; the grid, and so every panel's place in
+    # matplotlib's list of axes, changes under the zoom.
+    app.panels.append(FakeSubPlot())
+    app.redraw()
+    assert app.limits(0) == (20.0, 30.0, 40.0, 50.0)
+    assert app.limits(1) == (20.0, 30.0, 40.0, 50.0)
+    plt.close(app.f)
+
+
+def test_viewport_follows_the_coordinate_not_the_panel():
+    # A 2D x-y panel next to a lineout plotted against y.
+    app = FakeApp([FakeSubPlot(), FakeSubPlot('DensityPlot', False, ('y', None))])
+    app.zoom((20, 30), (40, 50))
+    # The 2D panel becomes another chart type and the lineout swaps places
+    # with it: each still shows the zoomed range of its own coordinates.
+    app.panels[0].chartType = 'MagPlots'
+    app.panels.reverse()
+    app.redraw()
+    assert app.limits(0)[:2] == (40.0, 50.0)
+    assert app.limits(1) == (20.0, 30.0, 40.0, 50.0)
+    plt.close(app.f)
+
+
+def test_rotated_panel_shows_the_viewport_on_swapped_axes():
+    app = FakeApp([FakeSubPlot(), FakeSubPlot()])
+    app.zoom((20, 30), (40, 50))
+    app.panels[1].axis_names = ('y', 'x')
+    app.redraw()
+    assert app.limits(0) == (20.0, 30.0, 40.0, 50.0)
+    assert app.limits(1) == (40.0, 50.0, 20.0, 30.0)
+    plt.close(app.f)

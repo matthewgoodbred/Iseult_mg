@@ -315,6 +315,37 @@ def test_eckart_and_landau_frames_differ_with_heat_flux():
     assert not np.allclose(p_e, p_l, rtol=1e-3)
 
 
+def test_proper_density_is_the_count_in_the_chosen_frame():
+    '''n' = -N.U per volume: sqrt(-N.N) in the Eckart frame, less than that in the Landau one.'''
+    n1, n2 = 3000, 1000
+    light = (np.full(n1, 0.5), np.zeros(n1), np.zeros(n1))
+    heavy = (np.full(n2, -0.2), np.zeros(n2), np.zeros(n2))
+    sums = [se.bin_moments(*light, np.zeros(n1), (-1, 1), 2),
+            se.bin_moments(*heavy, np.zeros(n2), (-1, 1), 2)]
+    num, mass = se.combine(sums, [0.1, 1.0])
+    N = se._number_flux(num)
+    n_eckart = np.sqrt(N[..., 0]**2 - np.sum(N[..., 1:]**2, axis=-1))
+    for family in se.REST_FRAME_FAMILIES:
+        assert 'n_rest' in se.components(family, 'lab')
+        assert 'n_rest' in se.components(family, 'fa')
+        assert not se.needs_field(family, 'n_rest')
+        n_e = se.evaluate(num, mass, family, 'n_rest', dens_factor=2.0, rest_frame='eckart')
+        n_l = se.evaluate(num, mass, family, 'n_rest', dens_factor=2.0, rest_frame='landau')
+        # The bin holding the particles, and the empty one
+        np.testing.assert_allclose(n_e[1], 2.0 * n_eckart[1])
+        assert n_e[0] == 0.0 and n_l[0] == 0.0
+        # -N.U >= sqrt(-N.N) for any unit timelike U, so the Eckart frame,
+        # moving with N, counts the fewest particles
+        assert 0 < n_e[1] < n_l[1]
+    # One cold particle species: every frame is its rest frame, n' = N / gamma
+    u = np.full(100, 0.75)
+    sums = se.bin_moments(u, np.zeros(100), np.zeros(100), np.zeros(100), (-1, 1), 1)
+    num, mass = se.combine([sums], [1.0])
+    for frame in se.FRAMES:
+        np.testing.assert_allclose(se.evaluate(num, mass, 'P', 'n_rest', rest_frame=frame),
+                                   100 / np.sqrt(1 + 0.75**2), rtol=1e-9)
+
+
 def test_rest_frame_pressure_matches_the_stress_energy_scalar():
     '''The Eckart scalar pressure is the P' the stress-energy tensor already showed.'''
     u, v, w = particles(n=5000, drift=(0.4, -0.3, 0.2), spread=0.8)
@@ -330,6 +361,10 @@ def test_cold_beam_has_no_rest_frame_pressure_in_either_frame():
     num, mass = se.combine([se.bin_moments(u, v, w, np.zeros(n), (-1, 1), 1)], [1.0])
     for frame in se.FRAMES:
         for comp in se.components('P', 'lab'):
+            if comp == 'n_rest':
+                # not a pressure: the beam's own density, n / gamma
+                np.testing.assert_allclose(se.evaluate(num, mass, 'P', comp, rest_frame=frame), n / np.sqrt(11))
+                continue
             np.testing.assert_allclose(se.evaluate(num, mass, 'P', comp, rest_frame=frame), 0.0, atol=1e-9)
             np.testing.assert_allclose(se.evaluate(num, mass, 'Theta', comp, rest_frame=frame), 0.0, atol=1e-9)
 
@@ -350,3 +385,54 @@ def test_anisotropy_is_only_offered_field_aligned():
         for comp in se.ANISOTROPY:
             assert se.needs_field(family, comp)
             se.ui_label(family, comp), se.tex_label(family, comp)
+
+
+def test_frame_velocity_components_are_each_bins_own_frame():
+    '''Two cells drifting differently each get their own U^mu, in either frame.'''
+    u = np.r_[np.full(100, 3.0), np.full(100, -1.0)]
+    v = np.r_[np.full(100, 0.5), np.zeros(100)]
+    x = np.r_[np.full(100, -0.5), np.full(100, 0.5)]
+    z = np.zeros(200)
+    num, mass = se.combine([se.bin_moments(u, v, z, x, (-1, 1), 2)], [1.0])
+    expected = np.array([[np.sqrt(1 + 9 + 0.25), 3.0, 0.5, 0.0],
+                         [np.sqrt(2), -1.0, 0.0, 0.0]])
+    for frame in se.FRAMES:
+        for i, comp in enumerate(se.components('U', 'lab')):
+            np.testing.assert_allclose(se.evaluate(num, mass, 'U', comp, rest_frame=frame),
+                                       expected[:, i], atol=1e-9)
+
+
+def test_frame_velocity_differs_between_eckart_and_landau_with_heat_flux():
+    n1, n2 = 3000, 1000
+    light = (np.full(n1, 0.5), np.zeros(n1), np.zeros(n1))
+    heavy = (np.full(n2, -0.2), np.zeros(n2), np.zeros(n2))
+    sums = [se.bin_moments(*light, np.zeros(n1), (-1, 1), 1),
+            se.bin_moments(*heavy, np.zeros(n2), (-1, 1), 1)]
+    num, mass = se.combine(sums, [0.1, 1.0])
+    U_e = se.evaluate(num, mass, 'U', 'x', rest_frame='eckart')
+    U_l = se.evaluate(num, mass, 'U', 'x', rest_frame='landau')
+    assert U_e[0] > 0 > U_l[0]
+    np.testing.assert_allclose(U_l, se.frame_velocity(num, mass, 'landau')[0][..., 1])
+    # Empty bins have no frame
+    empty = se.bin_moments(np.ones(3), np.zeros(3), np.zeros(3), np.full(3, 0.5), (0, 2), 2)
+    num, mass = se.combine([empty], [1.0])
+    for comp in se.components('U', 'lab'):
+        assert np.isnan(se.evaluate(num, mass, 'U', comp)[1])
+
+
+def test_frame_velocity_along_and_across_the_mean_field():
+    '''A beam drifting at 45 degrees to B splits evenly into U_par and |U_perp|.'''
+    n = 500
+    u, v, w = np.full(n, 2.0), np.zeros(n), np.full(n, 2.0)
+    x = np.zeros(n)
+    sums = se.bin_moments(u, v, w, x, (-1, 1), 1,
+                          bfield=uniform_grid((0.0, 0.0, 3.0)), positions=(x, None, None))
+    num, mass = se.combine([sums], [1.0])
+    assert se.components('U', 'fa') == ['t', 'par', 'perp']
+    assert se.needs_field('U', 'par') and not se.needs_field('U', 'x')
+    for frame in se.FRAMES:
+        np.testing.assert_allclose(se.evaluate(num, mass, 'U', 'par', rest_frame=frame), 2.0)
+        np.testing.assert_allclose(se.evaluate(num, mass, 'U', 'perp', rest_frame=frame), 2.0)
+        np.testing.assert_allclose(se.evaluate(num, mass, 'U', 't', rest_frame=frame), 3.0)
+    for comp in se.components('U', 'lab') + se.components('U', 'fa'):
+        se.ui_label('U', comp), se.tex_label('U', comp)

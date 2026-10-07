@@ -31,21 +31,24 @@ and dividing by q_s N^0_s gives the species' generalized Ohm's law
 with V_s = N_s / N^0_s its mean 3-velocity and n_s = N^0_s its lab-frame
 density. Summed over species and combined with Maxwell's equations, the lorentz
 force becomes the divergence of the Maxwell stress less the rate of change of
-the field momentum, which is the pressure (momentum) balance
+the field momentum, which is the pressure (momentum) balance. In Tristan's code
+units, where 4 pi is absorbed into the fields and the magnetic pressure is
+B^2/2, it reads
 
     0 = -d_t T^{0i} - d_j T^{ij}                       particles
-        - d_i B^2/8pi + d_j(B^i B^j)/4pi              magnetic pressure, tension
-        - d_i E^2/8pi + d_j(E^i E^j)/4pi              electric pressure, tension
-        - d_t (E x B)^i / 4pi c                       field momentum
+        - d_i B^2/2 + d_j(B^i B^j)                    magnetic pressure, tension
+        - d_i E^2/2 + d_j(E^i E^j)                    electric pressure, tension
+        - d_t (E x B)^i / c                           field momentum
 
 Units. Both Tristan versions push particles with d(c u)/dt = (q/m)(E + beta x B)
 per time step, with E and B in the units they are written out in, and q/m =
 +-qi/m for ions/electrons in terms of Iseult's 'qi', 'mi' and 'me'. So the
 Ohm's-law terms are electric fields in the same units as the E the Fields
-panel shows. The fields are Gaussian with 4 pi replaced by
-c^2 / (ppc0 c_omp^2) in Tristan v2 (its `unit_ch`) and by 1 in Tristan v1, with
-charges +-qi, so the pressure-balance terms can all be put in units of
-n0 m c^2 per c/omega_pe, n0 = ppc0 particles per cell.
+panel shows. In code units the field pressure is F^2/2 and a particle of
+mass ratio m has mass m unit_ch, unit_ch = c^2 / (ppc0 c_omp^2), in Tristan v2
+(its masses and charges are both scaled by unit_ch), and mass m in Tristan v1,
+so the pressure-balance terms can all be put in units of n0 m c^2 per
+c/omega_pe, n0 = ppc0 particles per cell.
 
 The particles are binned in a thin stencil around the slice: along the slice,
 and in three bins across it in each transverse direction that the simulation
@@ -202,6 +205,18 @@ class Stencil:
         for axis, stride in ((self.t1, 1), (self.t2, self.n1)):
             center, width, n = self.trans[axis]
             if n == 1:
+                if width is None:
+                    continue
+                # A single bin of finite width keeps only the particles in it,
+                # as the grid quantities are averaged over just that range.
+                pos = positions.get(axis)
+                if pos is None:
+                    continue
+                pos = np.asarray(pos, dtype=np.float64)
+                inside = np.abs(pos - center) <= 0.5 * width
+                mask = inside if mask is None else mask & inside
+                if v is None:
+                    v = np.zeros(len(pos))
                 continue
             pos = positions.get(axis)
             if pos is None:
@@ -390,7 +405,7 @@ PB_STRESS_TERMS = ('mag_pressure', 'mag_tension', 'elec_pressure', 'elec_tension
 
 def maxwell_stress(F):
     '''The magnetic (or electric) part of the Maxwell stress, split into its
-    isotropic pressure F^2/2 and its tension F^i F^j, in units where 4 pi = 1.'''
+    isotropic pressure F^2/2 and its tension F^i F^j, in code units (4 pi = 1).'''
     return 0.5 * np.sum(F ** 2, axis=0), np.einsum('i...,j...->ij...', F, F)
 
 
@@ -423,14 +438,38 @@ def force_terms(split, stencil, i):
 def field_force_terms(stencil, E, B, i, em_factor, em_momentum_dt=None):
     '''The Maxwell-stress force density, component i.
 
-    `em_factor` turns F^2 into a pressure in the chosen units, i.e.
-    1 / (4 pi m c^2 n0). `em_momentum_dt` is d/dt of (E x B)^i on the slice.'''
+    `em_factor` turns the code-unit pressure F^2/2 into the chosen units, i.e.
+    1 / (m c^2 n0) with m the code-unit mass. `em_momentum_dt` is d/dt of (E x B)^i on the slice.'''
     out = {}
     for name, F in (('mag', B), ('elec', E)):
         pressure, tension = maxwell_stress(F)
         out[name + '_pressure'] = -stencil.gradient(pressure, i) * em_factor
         out[name + '_tension'] = stencil.divergence(tension, i)[0] * em_factor
     out['em_momentum'] = -em_momentum_dt * em_factor if em_momentum_dt is not None else None
+    return out
+
+
+def integrate_force(force, dh, stress=None):
+    '''int force dh along the slice, from the bin centres (trapezoids).
+
+    The integral is fixed up to a constant, which is chosen so that its mean
+    along the slice is that of -`stress`, the along-slice stress T^{ij} the
+    force is -d_j of (0 when None, e.g. for a time derivative). So in a steady
+    1D state the integral of -d_x B^2/2 is -B^2/2 itself. Empty bins (NaN) add
+    nothing to the integral and stay NaN.'''
+    force = np.asarray(force, dtype=np.float64)
+    finite = np.isfinite(force)
+    f = np.where(finite, force, 0.0)
+    out = np.zeros_like(f)
+    out[..., 1:] = np.cumsum(0.5 * (f[..., 1:] + f[..., :-1]), axis=-1) * dh
+    out = np.where(finite, out, np.nan)
+    target = 0.0
+    if stress is not None:
+        stress = np.where(finite, np.asarray(stress, dtype=np.float64), np.nan)
+        if np.any(np.isfinite(stress)):
+            target = -np.nanmean(stress)
+    if np.any(np.isfinite(out)):
+        out = out + (target - np.nanmean(out))
     return out
 
 

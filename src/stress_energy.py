@@ -346,18 +346,22 @@ def bin_moments(u, v, w, h, h_range, nh, vpos=None, v_range=None, nv=1,
 
 # The index of each family is the panel's legacy 'm_type', so that configs
 # saved before the stress-energy tensor existed still show the same thing.
-FAMILIES = ('beta', 'u', 'energy', 'T', 'P', 'Theta')
+FAMILIES = ('beta', 'u', 'energy', 'T', 'P', 'Theta', 'U')
 
 FAMILY_NAMES = {'beta': '3-velocity  <β>',
                 'u': '4-velocity  <u^μ> = <γ(1, β)>',
                 'energy': 'Energy',
                 'T': 'Stress-energy tensor  T^μν',
                 'P': "Rest-frame pressure  P'^ij",
-                'Theta': "Rest-frame temperature  Θ'^ij = P'^ij / n'"}
+                'Theta': "Rest-frame temperature  Θ'^ij = P'^ij / n'",
+                'U': 'Rest-frame 4-velocity  U^μ'}
 
 # The families that are worked out in the plasma rest frame, and so depend on
 # which rest frame is picked
 REST_FRAME_FAMILIES = ('P', 'Theta')
+# Every family that depends on which rest frame is picked: the rest-frame
+# tensors, and the 4-velocity of the rest frame itself
+FRAME_FAMILIES = REST_FRAME_FAMILIES + ('U',)
 
 FRAMES = ('eckart', 'landau')
 FRAME_NAMES = {'eckart': 'Eckart  (no number flux)',
@@ -372,7 +376,8 @@ SPATIAL = {'lab': ('x', 'y', 'z'), 'fa': ('par', 'perp')}
 
 # Scalars that do not depend on the basis, shown under the tensor grid
 T_INVARIANTS = ('trace', 'e_rest', 'p_rest')
-P_INVARIANTS = ('scalar',)
+# n_rest is the proper density, the number density in the chosen rest frame
+P_INVARIANTS = ('scalar', 'n_rest')
 # The temperature anisotropy of the field-aligned basis. The ratio is the same
 # for the pressure and the temperature, as the density cancels.
 ANISOTROPY = ('par_over_perp', 'perp_over_par')
@@ -389,7 +394,7 @@ def components(family, basis):
     '''Every component of `family` that can be shown in `basis`, in order.'''
     if family == 'beta':
         return list(SPATIAL[basis]) + ['mag']
-    if family == 'u':
+    if family in ('u', 'U'):
         return ['t'] + list(SPATIAL[basis])
     if family == 'energy':
         return ['ke', 'thermal', 'gamma_bulk']
@@ -413,7 +418,8 @@ def default_components(family, basis):
             'energy': ['ke'],
             'T': ['00'],
             'P': ['scalar'],
-            'Theta': ['scalar']}[family]
+            'Theta': ['scalar'],
+            'U': ['x'] if basis == 'lab' else ['par']}[family]
 
 
 def needs_field(family, comp):
@@ -442,10 +448,15 @@ def ui_label(family, comp):
                'trace': 'Tr(Tij)/3  (mean pressure)',
                'e_rest': "e'  (rest-frame energy density)",
                'p_rest': "P'  (rest-frame pressure)"}
+    if family == 'U':
+        return {'t': 'U^0 = Γ', 'x': 'U^x', 'y': 'U^y', 'z': 'U^z',
+                'par': 'U^∥', 'perp': '|U^⊥|'}[comp]
     if comp in ANISOTROPY:
         return {'par_over_perp': 'T∥ / T⊥', 'perp_over_par': 'T⊥ / T∥'}[comp]
     if family in REST_FRAME_FAMILIES and comp == 'scalar':
         return "Tr/3  (scalar P')" if family == 'P' else "Tr/3  (scalar Θ')"
+    if family in REST_FRAME_FAMILIES and comp == 'n_rest':
+        return "n'  (proper density)"
     if comp in special:
         return special[comp]
     if family in ('T',) + REST_FRAME_FAMILIES:
@@ -471,6 +482,10 @@ def tex_label(family, comp, mass_weight=False):
         if comp == 'perp':
             return r'|\langle %s_\perp\rangle|' % sym
         return r'\langle %s_{%s}\rangle' % (sym, _TEX_INDEX[comp])
+    if family == 'U':
+        if comp == 'perp':
+            return r'|U^\perp|'
+        return r'U^{%s}' % _TEX_INDEX['0' if comp == 't' else comp]
     if family == 'energy':
         return {'ke': r'\langle\gamma-1\rangle',
                 'thermal': r"\langle\gamma'-1\rangle",
@@ -483,6 +498,8 @@ def tex_label(family, comp, mass_weight=False):
         sym = 'P' if family == 'P' else r'\Theta'
         if comp == 'scalar':
             return sym
+        if comp == 'n_rest':
+            return "n'"
         if comp == 'parpar':
             return sym + r'_\parallel'
         if comp == 'perpperp':
@@ -614,6 +631,33 @@ def frame_velocity(num, mass, frame):
     return U, np.where(valid & (n > 0), n, np.nan)
 
 
+def frame_velocity_component(num, mass, comp, frame):
+    '''One component of the 4-velocity U^mu of each bin's own rest frame,
+    relative to the lab: 't' (its Lorentz factor), a lab axis, or, along the
+    bin's mean lab-frame magnetic field, 'par' and the magnitude 'perp'.
+    The field-aligned ones need the field sums of the field-aligned pass.
+    Bins where the frame is not defined, e.g. empty ones, are NaN.'''
+    U, _ = frame_velocity(num, mass, frame)
+    if comp == 't':
+        return U[..., 0]
+    if comp in _LAB_INDEX:
+        return U[..., 1 + _LAB_INDEX[comp]]
+    if num.shape[0] < N_FIELD_ALIGNED:
+        raise ValueError('The field-aligned basis needs the field-aligned particle pass.')
+    B = np.stack([num[FBX], num[FBY], num[FBZ]], axis=-1)
+    mag = np.sqrt(np.sum(B ** 2, axis=-1))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        bhat = B / mag[..., None]
+    bhat[~(mag > 0)] = np.nan
+    u = U[..., 1:]
+    upar = np.sum(u * bhat, axis=-1)
+    if comp == 'par':
+        return upar
+    if comp == 'perp':
+        return np.sqrt(np.sum((u - upar[..., None] * bhat) ** 2, axis=-1))
+    raise KeyError(comp)
+
+
 def boost_to_rest(U):
     '''The pure boost Lambda^mu_nu that takes the lab frame to the frame
     moving with 4-velocity U, shape (bins..., 4, 4). Its spatial axes are
@@ -714,9 +758,9 @@ def evaluate(num, mass, family, comp, normalization='density',
     mass_weight : bool
         For the 4-velocity only: show the momentum m u rather than u.
     rest_frame : 'eckart' or 'landau'
-        For the rest-frame pressure and temperature only: which rest frame.
-        The pressure is always per unit volume, the temperature P / n per
-        particle counted in the rest frame.
+        For the rest-frame pressure, temperature and 4-velocity only: which rest frame.
+        The pressure and the proper density n_rest are always per unit volume,
+        the temperature P / n per particle counted in the rest frame.
 
     Bins holding no particles come back as NaN, except for a density, which is
     then genuinely zero.
@@ -745,6 +789,14 @@ def evaluate(num, mass, family, comp, normalization='density',
             return _safe_div(count, n_rest)
         # thermal: rest-frame energy per particle less its rest mass
         return _safe_div(e_rest, n_rest) - _safe_div(mass[N_], count)
+
+    if family == 'U':
+        return frame_velocity_component(num, mass, comp, rest_frame)
+
+    if family in REST_FRAME_FAMILIES and comp == 'n_rest':
+        # The particles the rest frame counts, n = -N.U, per unit volume
+        _, n = frame_velocity(num, mass, rest_frame)
+        return np.where(count > 0, n, 0.0) * dens_factor
 
     if family in REST_FRAME_FAMILIES:
         P, n, U, L = rest_frame_pressure(num, mass, rest_frame)

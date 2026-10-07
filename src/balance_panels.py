@@ -26,7 +26,6 @@ import data_loading
 import fluid_balance as fb
 import plot_axes
 import stress_energy as se
-from NumbaMoments import stepify
 
 COMPONENTS = ('x', 'y', 'z')
 FIELD_KEYS = ('ex', 'ey', 'ez', 'bx', 'by', 'bz')
@@ -190,19 +189,31 @@ class BalancePanel:
         dh = length / nh
         width = float(self.GetPlotParam('trans_width'))
         width = max(dh, self.AUTO_WIDTH) if width <= 0 else width
-        averaged = bool(self.parent.MainParamDict['Average1D'])
+        # Across the slice, the axis in the 2D plane is centred on the 2D
+        # viewport, or averaged over all of it; the one out of the plane is
+        # centred on the plane itself.
+        averaged = plot_axes.averages_lineouts(self)
+        view = plot_axes.lineout_viewport(self)
         trans = {}
         key_parts = ['balance', axis, str(nh)]
         for other in fb.AXES:
             if other == axis:
                 continue
-            if self._max_index(other) == 0 or averaged:
+            if self._max_index(other) == 0:
                 trans[other] = (None, None, 1)
                 key_parts.append(f'{other}:all')
+                continue
+            if other in view:
+                low, high = view[other]
+                center = 0.5 * (low + high)
+                if averaged and high - low > 0:
+                    trans[other] = (center, high - low, 1)
+                    key_parts.append(f'{other}:{low:.6g}..{high:.6g}')
+                    continue
             else:
                 center = self._slice_index(other) * self.istep / self.c_omp
-                trans[other] = (center, width, 3)
-                key_parts.append(f'{other}:{center:.6g}±{width:.6g}')
+            trans[other] = (center, width, 3)
+            key_parts.append(f'{other}:{center:.6g}±{width:.6g}')
         key_parts.append(str(self.parent.MainParamDict['PrtlStride']))
         return fb.Stencil(axis, h_edges, trans), '|'.join(key_parts)
 
@@ -244,7 +255,7 @@ class BalancePanel:
             return entry
         start = time.perf_counter()
         axis = stencil.axis
-        active = [a for a in (stencil.t1, stencil.t2) if stencil.trans[a][2] > 1]
+        active = [a for a in (stencil.t1, stencil.t2) if stencil.trans[a][1] is not None]
         sums = []
         n_particles = 0
         for prtl_type in (0, 1):
@@ -442,7 +453,7 @@ class BalancePanel:
         for key in list(self.lines):
             if key not in wanted:
                 self.lines.pop(key).remove()
-        x_edges = self.stencil.h_edges
+        x = self.stencil.h_centers
         handles, labels = [], []
         ymin, ymax = np.inf, -np.inf
         for key, label, values, style in self.series:
@@ -457,7 +468,7 @@ class BalancePanel:
             else:
                 line.set_dashes(style['dashes'])
             vals = np.asarray(values, dtype=np.float64)
-            line.set_data(*stepify(x_edges, vals))
+            line.set_data(x, vals)
             finite = vals[np.isfinite(vals)]
             if finite.size:
                 ymin, ymax = min(ymin, finite.min()), max(ymax, finite.max())
@@ -618,16 +629,17 @@ class OhmsLawPanel(BalancePanel):
 class PressureBalancePanel(BalancePanel):
     plot_param_dict = dict(BalancePanel.plot_param_dict)
     plot_param_dict.update({'mode': 0,           # 0 = force densities (the divergence form), 1 = stresses
+                            'integrate': False,  # force densities integrated along the slice, int f dx
                             'species': 0,        # particle terms of: 0 = all species together, 1 = ions,
                                                  # 2 = electrons, 3 = ions and electrons separately
                             'force_terms': '',   # comma separated, see fluid_balance.PB_FORCE_TERMS
                             'stress_terms': ''}) # comma separated, see fluid_balance.PB_STRESS_TERMS
 
-    TERM_NAMES = {'mag_pressure': 'Magnetic pressure  B²/8π',
-                  'mag_tension': 'Magnetic tension  BB/4π',
-                  'elec_pressure': 'Electric pressure  E²/8π',
-                  'elec_tension': 'Electric tension  EE/4π',
-                  'em_momentum': 'Field momentum  ∂(E×B)/∂t / 4πc',
+    TERM_NAMES = {'mag_pressure': 'Magnetic pressure  B²/2',
+                  'mag_tension': 'Magnetic tension  BB',
+                  'elec_pressure': 'Electric pressure  E²/2',
+                  'elec_tension': 'Electric tension  EE',
+                  'em_momentum': 'Field momentum  ∂(E×B)/∂t / c',
                   'pressure': 'Particle pressure  P',
                   'inertia': 'Bulk inertia  εUU',
                   'heat': 'Heat flux  qU+Uq',
@@ -639,6 +651,10 @@ class PressureBalancePanel(BalancePanel):
 
     def mode(self):
         return 1 if self.GetPlotParam('mode') == 1 else 0
+
+    def integrated(self):
+        '''Whether the force densities are shown integrated along the slice.'''
+        return self.mode() == 0 and bool(self.GetPlotParam('integrate'))
 
     def term_param(self):
         return 'stress_terms' if self.mode() else 'force_terms'
@@ -668,11 +684,13 @@ class PressureBalancePanel(BalancePanel):
         n0 = ppc0 if self.has_ppc0 else 1.0
         per_particle = stride * self.parent.MainParamDict['PrtlStride']
         particle = per_particle / (self.bin_volume_cells(self.stencil) * n0)
+        # The field pressure is F^2/2 in code units; divide it by n0 m c^2 with
+        # m the code-unit mass, which Tristan v2 scales by its unit_ch.
         if self.version == 1:
-            four_pi = 1.0
+            unit_ms = 1.0
         else:
-            four_pi = self.c ** 2 / ((ppc0 if self.has_ppc0 else 1.0) * self.c_omp ** 2)
-        field = 1.0 / (four_pi * self.m_ref * self.c ** 2 * n0)
+            unit_ms = self.c ** 2 / ((ppc0 if self.has_ppc0 else 1.0) * self.c_omp ** 2)
+        field = 1.0 / (unit_ms * self.m_ref * self.c ** 2 * n0)
         return particle, field
 
     def compute(self):
@@ -704,13 +722,15 @@ class PressureBalancePanel(BalancePanel):
             for extra in (fields['em_momentum'], particle['total']['dpdt']):
                 if extra is not None:
                     residual = residual + extra
-            labels = {'mag_pressure': r'$-\partial_%s B^2/8\pi$' % ci,
-                      'mag_tension': r'$\partial_j(B_%sB_j)/4\pi$' % ci,
-                      'elec_pressure': r'$-\partial_%s E^2/8\pi$' % ci,
-                      'elec_tension': r'$\partial_j(E_%sE_j)/4\pi$' % ci,
-                      'em_momentum': r'$-\partial_t(\mathbf{E}\times\mathbf{B})_%s/4\pi c$' % ci,
+            labels = {'mag_pressure': r'$-\partial_%s B^2/2$' % ci,
+                      'mag_tension': r'$\partial_j(B_%sB_j)$' % ci,
+                      'elec_pressure': r'$-\partial_%s E^2/2$' % ci,
+                      'elec_tension': r'$\partial_j(E_%sE_j)$' % ci,
+                      'em_momentum': r'$-\partial_t(\mathbf{E}\times\mathbf{B})_%s/c$' % ci,
                       'residual': 'residual'}
             values = dict(fields, residual=residual)
+            if self.integrated():
+                values, labels, particle = self.integrate(values, particle, by_group, i, j, f_factor, p_factor)
         else:
             fields = fb.field_stress_terms(self.stencil, self.E, self.B, i, j, f_factor)
             particle = {}
@@ -722,10 +742,10 @@ class PressureBalancePanel(BalancePanel):
                 particle[group] = terms
             tot = sum(fields.values())
             tot = tot + particle['total']['pressure'] + particle['total']['inertia'] + particle['total']['heat']
-            labels = {'mag_pressure': r'$B^2/8\pi$',
-                      'mag_tension': r'$-B_%sB_%s/4\pi$' % (ci, cj),
-                      'elec_pressure': r'$E^2/8\pi$',
-                      'elec_tension': r'$-E_%sE_%s/4\pi$' % (ci, cj),
+            labels = {'mag_pressure': r'$B^2/2$',
+                      'mag_tension': r'$-B_%sB_%s$' % (ci, cj),
+                      'elec_pressure': r'$E^2/2$',
+                      'elec_tension': r'$-E_%sE_%s$' % (ci, cj),
                       'total': r'$T^{%s%s}_{\rm tot}$' % (ci, cj)}
             values = dict(fields, total=tot)
             if i != j:
@@ -746,7 +766,7 @@ class PressureBalancePanel(BalancePanel):
                         for a in fb.AXES:
                             self.series.append(
                                 (f'pressure_{a}|{group}',
-                                 r'$-\partial_%s P%s_{%s%s}$' % (a, self.species_sup(group), ci, a),
+                                 self.split_label(a, group, ci, cj),
                                  particle[group]['pressure_' + a],
                                  {'color': TERM_COLORS['pressure'], 'dashes': SPLIT_DASHES[a], 'lw': 0.9}))
             else:
@@ -758,6 +778,40 @@ class PressureBalancePanel(BalancePanel):
                     style['lw'] = 1.6
                 self.series.append((key, labels[key], vals, style))
 
+    def integrate(self, values, particle, by_group, i, j, f_factor, p_factor):
+        '''Replace each force density f with int f d(slice axis), and relabel.
+
+        Each integral's constant makes its mean that of minus the stress the force
+        is -d_j of, so a term whose force is purely along the slice is minus that
+        stress: the magnetic pressure term of the i = j component is -B^2/2.'''
+        dh = self.stencil.dh
+        ci, cj = COMPONENTS[i], COMPONENTS[j]
+        stresses = fb.field_stress_terms(self.stencil, self.E, self.B, i, j, f_factor)
+        values = {k: None if v is None else fb.integrate_force(v, dh, stresses.get(k))
+                  for k, v in values.items()}
+        new_particle = {}
+        for group, terms in particle.items():
+            stress = {k: v * p_factor for k, v in fb.stress_terms(by_group[group], self.stencil, i, j).items()}
+            stress['pressure_' + cj] = stress['pressure']
+            new_particle[group] = {k: None if v is None else fb.integrate_force(v, dh, stress.get(k))
+                                   for k, v in terms.items()}
+        d = r'\,d%s' % cj
+        labels = {'mag_pressure': (r'$-B^2/2$' if i == j else r'$-\int\partial_%s B^2/2%s$' % (ci, d)),
+                  'mag_tension': r'$\int\partial_k(B_%sB_k)%s$' % (ci, d),
+                  'elec_pressure': (r'$-E^2/2$' if i == j else r'$-\int\partial_%s E^2/2%s$' % (ci, d)),
+                  'elec_tension': r'$\int\partial_k(E_%sE_k)%s$' % (ci, d),
+                  'em_momentum': r'$-\int\partial_t(\mathbf{E}\times\mathbf{B})_%s/c%s$' % (ci, d),
+                  'residual': r'$\int$residual$%s$' % d}
+        return values, labels, new_particle
+
+    def split_label(self, a, group, ci, cj):
+        sp = self.species_sup(group)
+        if not self.integrated():
+            return r'$-\partial_%s P%s_{%s%s}$' % (a, sp, ci, a)
+        if a == cj:
+            return r'$-P%s_{%s%s}$' % (sp, ci, a)
+        return r'$-\int\partial_%s P%s_{%s%s}\,d%s$' % (a, sp, ci, a, cj)
+
     @staticmethod
     def species_sup(group):
         return '' if group == 'total' else '^{%s}' % SPECIES_TEX[group]
@@ -767,6 +821,12 @@ class PressureBalancePanel(BalancePanel):
         sp = self.species_sup(group)
         if key in ('p_xx', 'p_yy', 'p_zz'):
             return r'$P%s_{%s}$' % (sp, key[2:])
+        if self.integrated():
+            d = r'\,d%s' % cj
+            return {'pressure': r'$-\int(\nabla\cdot\mathsf{P}%s)_%s%s$' % (sp, ci, d),
+                    'inertia': r'$-\int[\nabla\cdot(\varepsilon\mathbf{UU})%s]_%s%s$' % (sp, ci, d),
+                    'heat': r'$-\int[\nabla\cdot(\mathbf{qU}+\mathbf{Uq})%s]_%s%s$' % (sp, ci, d),
+                    'dpdt': r'$-\int\partial_t T^{0%s}%s%s$' % (ci, '' if group == 'total' else '_{%s}' % SPECIES_TEX[group], d)}[key]
         if self.mode() == 0:
             return {'pressure': r'$-(\nabla\cdot\mathsf{P}%s)_%s$' % (sp, ci),
                     'inertia': r'$-[\nabla\cdot(\varepsilon\mathbf{UU})%s]_%s$' % (sp, ci),
@@ -780,6 +840,8 @@ class PressureBalancePanel(BalancePanel):
         unit = r'n_0 m_%s c^2' % self.mass_unit if getattr(self, 'has_ppc0', True) else r'm_%s c^2/{\rm cell}' % self.mass_unit
         if self.mode():
             return r'Stress $T^{%s%s}$  [$%s$]' % (COMPONENTS[self.component()], self.stencil.axis, unit)
+        if self.integrated():
+            return r'$\int f_%s\,d%s$  [$%s$]' % (COMPONENTS[self.component()], self.stencil.axis, unit)
         return r'Force density, $%s$  [$%s\,\omega_{\rm pe}/c$]' % (COMPONENTS[self.component()], unit)
 
 
@@ -913,26 +975,11 @@ class BalanceSettings(Tk.Toplevel):
         plot_axes.add_axis_buttons(box, self, self.parent, row=0, column=0, two_d=False,
                                    on_change=self.build_body)
         axis = plot_axes.plot_axis_name(self.parent)
-        main = self.parent.parent
         loc = ttk.Frame(box)
         loc.grid(row=1, column=0, sticky=Tk.W, pady=(2, 0))
-        self.SliceVars = {}
-        if main.MainParamDict['Average1D']:
-            ttk.Label(loc, text='Averaged over the transverse directions (the main window\'s "1D Average").',
-                      foreground='gray35').pack(side=Tk.LEFT)
-        else:
-            shown = False
-            for other in fb.AXES:
-                if other == axis or {'x': main.MaxXInd, 'y': main.MaxYInd, 'z': main.MaxZInd}[other] == 0:
-                    continue
-                ttk.Label(loc, text=('at ' if not shown else '  ') + f'{other} =').pack(side=Tk.LEFT)
-                var = Tk.StringVar(self)
-                var.set('%.4g' % (getattr(main, other + 'Slice', 0) * main.istep / main.c_omp))
-                self.SliceVars[other] = var
-                self.entry(loc, var, 8).pack(side=Tk.LEFT, padx=2)
-                shown = True
-            if shown:
-                ttk.Label(loc, text='c/ωpe  (shared with the other lineouts)').pack(side=Tk.LEFT, padx=(4, 0))
+        how = 'Averaged over' if plot_axes.averages_lineouts(self.parent) else 'Through the centre of'
+        ttk.Label(loc, text=how + ' the 2D view (set in the main window\'s "1D lineouts").',
+                  foreground='gray35').pack(side=Tk.LEFT)
 
         line = ttk.Frame(box)
         line.grid(row=2, column=0, sticky=Tk.W, pady=(2, 0))
@@ -998,20 +1045,8 @@ class BalanceSettings(Tk.Toplevel):
                 else:
                     changed = True
 
-        main = self.parent.parent
-        for axis, var in self.SliceVars.items():
-            max_index = {'x': main.MaxXInd, 'y': main.MaxYInd, 'z': main.MaxZInd}[axis]
-            try:
-                index = int(np.around(float(var.get()) * main.c_omp / main.istep))
-            except ValueError:
-                index = getattr(main, axis + 'Slice', 0)
-            index = min(max(index, 0), max_index)
-            var.set('%.4g' % (index * main.istep / main.c_omp))
-            if index != getattr(main, axis + 'Slice', 0) and max_index > 0:
-                main.MainParamDict[axis + 'Slice'] = float(index) / max_index
-                changed = True
         if changed:
-            main.RenewCanvas()
+            self.parent.parent.RenewCanvas()
 
     def ctypeChanged(self, *args):
         if self.ctypevar.get() != self.parent.chartType:
@@ -1043,6 +1078,9 @@ class PressureBalanceSettings(BalanceSettings):
         box = self.section(master, row, 'Total momentum balance')
         self.radio_row(box, 'Show:', 'mode', ('Force densities  (−∂_j T^ij)', 'Stresses  T^ij along the slice'),
                        rebuild=True).grid(row=0, column=0, sticky=Tk.W)
+        if not self.parent.mode():
+            self.check(box, 'Integrate along the slice:  −∫ f dx, e.g. B²/2 rather than −∂B²/2',
+                       'integrate').grid(row=4, column=0, sticky=Tk.W, pady=(2, 0))
         self.radio_row(box, 'Component i:', 'component', COMPONENTS).grid(row=1, column=0, sticky=Tk.W)
         self.radio_row(box, 'Particle terms of:', 'species',
                        ('All', 'Ions', 'Electrons', 'Each species')).grid(row=2, column=0, sticky=Tk.W)
@@ -1051,8 +1089,9 @@ class PressureBalanceSettings(BalanceSettings):
                     'In a steady 1D state their total is constant along the slice.')
         else:
             text = ('Each force density; with every term included they add up to zero. The residual always '
-                    'includes every term, with the particle terms of all species together.')
-        ttk.Label(box, text=text + '  In units of n0 m c², n0 = ppc0 per cell.', foreground='gray35',
+                    'includes every term, with the particle terms of all species together. Integrated, each '
+                    'term\'s constant makes its mean that of its stress T^ij along the slice (0 if none).')
+        ttk.Label(box, text=text + '  Code units (magnetic pressure B²/2), per n0 m c², n0 = ppc0 per cell.', foreground='gray35',
                   wraplength=460, justify=Tk.LEFT).grid(row=3, column=0, sticky=Tk.W, pady=(2, 0))
         return row + 1
 

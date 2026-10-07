@@ -219,6 +219,35 @@ def test_magnetic_pressure_and_tension_of_a_sheared_field():
     np.testing.assert_allclose(fy['mag_pressure'], 0.0)
 
 
+def test_integrated_magnetic_pressure_is_b_squared_over_two():
+    '''int (-d_x B^2/2) dx, with the constant matched to the stress, is -B^2/2.'''
+    nx = 400
+    spacing = 0.05
+    xg = (np.arange(nx) - nx / 2) * spacing
+    B = np.zeros((3, 1, 1, nx))
+    B[0] = 1.0
+    B[1] = np.tanh(xg)
+    stencil = fb.Stencil('x', np.linspace(0, nx * spacing, nx + 1), {'y': (None, None, 1), 'z': (None, None, 1)})
+    Bb = np.stack([fb.bin_grid(B[k], stencil, {}, spacing) for k in range(3)])
+    E = np.zeros_like(Bb)
+    force = fb.field_force_terms(stencil, E, Bb, 0, 1.0)
+    stress = fb.field_stress_terms(stencil, E, Bb, 0, 0, 1.0)
+    integral = fb.integrate_force(force['mag_pressure'], stencil.dh, stress['mag_pressure'])
+    np.testing.assert_allclose(integral, -stress['mag_pressure'], atol=2e-3)
+    # the along-slice part of the tension integrates to +B_x B_x
+    integral = fb.integrate_force(force['mag_tension'], stencil.dh, stress['mag_tension'])
+    np.testing.assert_allclose(integral, 1.0, atol=1e-12)
+
+
+def test_integrate_force_skips_empty_bins():
+    force = np.array([1.0, np.nan, 1.0, 1.0])
+    out = fb.integrate_force(force, 1.0)
+    assert np.isnan(out[1])
+    assert np.all(np.isfinite(out[[0, 2, 3]]))
+    assert abs(np.nanmean(out)) < 1e-12
+    np.testing.assert_allclose(np.diff(out[2:]), 1.0)
+
+
 def test_time_derivative_falls_back_to_one_side():
     assert fb.time_derivative((1.0, 2.0), None, (2.0, 5.0)) == 3.0
     assert fb.time_derivative((1.0, 2.0), (0.0, 1.0), None) == 1.0

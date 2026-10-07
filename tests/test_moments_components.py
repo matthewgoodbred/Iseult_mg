@@ -45,6 +45,8 @@ def make_panel(**params):
     ({'m_type': 0, 'components': 'none'}, 'beta', []),
     ({'m_type': 4, 'components': 'yy,xx,00'}, 'P', ['xx', 'yy']),  # no time components
     ({'m_type': 5, 'basis': 1, 'components': 'perpperp,scalar'}, 'Theta', ['perpperp', 'scalar']),
+    ({'m_type': 6, 'components': 'z,t'}, 'U', ['t', 'z']),
+    ({'m_type': 6, 'basis': 1, 'components': 'x'}, 'U', ['par']),  # not in this basis
 ])
 def test_selected_components(params, family, comps):
     panel = make_panel(**params)
@@ -86,6 +88,8 @@ def test_rest_frame_components_in_the_field_aligned_basis_need_the_field_pass():
     assert make_panel(m_type=5, rest_frame=1).rest_frame() == 'landau'
     assert make_panel(m_type=4).per_volume()
     assert not make_panel(m_type=5).per_volume()
+    # The proper density is per unit volume, whichever rest-frame family it is under
+    assert make_panel(m_type=5, components='n_rest').per_volume()
 
 
 def test_binning_changes_change_the_key():
@@ -94,3 +98,13 @@ def test_binning_changes_change_the_key():
     for params in ({'xbins': 50}, {'weighted': True}, {'plot_axis': 1}, {'twoD': 1}):
         other = make_panel(**params)
         assert other.binning_spec()['key_lab'] != key
+
+
+def test_frame_velocity_is_dimensionless_and_names_its_frame():
+    panel = make_panel(m_type=6, components='x', rest_frame=1)
+    panel.mass_unit = 'i'  # set by LoadData
+    assert not panel.per_volume()
+    assert panel.units_tex() == ''
+    assert panel.ylabel().endswith('(Landau)')
+    assert not panel.binning_spec()['field_aligned']
+    assert make_panel(m_type=6, basis=1, components='par').binning_spec()['field_aligned']

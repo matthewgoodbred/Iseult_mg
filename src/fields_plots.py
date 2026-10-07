@@ -15,6 +15,23 @@ import streamlines
 import vector_arrows
 import plot_axes
 
+# Field types 6-9 plot the total magnitude (or its square) of the B or E field.
+# Maps field_type -> (field prefix, power of the magnitude)
+MAGNITUDE_TYPES = {6: ('b', 1), 7: ('b', 2), 8: ('e', 1), 9: ('e', 2)}
+# Field type 10 plots E.J, the work done by the field on the particles.
+EDOTJ_TYPE = 10
+# Field types that are a single scalar, shown through the x slot
+SCALAR_TYPES = set(MAGNITUDE_TYPES) | {EDOTJ_TYPE}
+
+def norm_suffix(field_type):
+    """The '/B_0' style label suffix for a normalized field type ('' if none)."""
+    if field_type == 0: return r'$/B_0$'
+    if field_type == 1: return r'$/E_0$'
+    if field_type in MAGNITUDE_TYPES:
+        prefix, power = MAGNITUDE_TYPES[field_type]
+        return r'$/%s_0%s$' % (prefix.upper(), '^2' if power == 2 else '')
+    return ''
+
 class FieldsPanel:
     # A dictionary of all of the parameters for this plot with the default parameters
     example = """## WHATEVER IS TYPED HERE IS EVALUATED AS PURE PYTHON. THERE IS NO ERROR CHECKING
@@ -43,19 +60,25 @@ class FieldsPanel:
                        'cmdstr2': example,
                        'cmdstr3': example,
                        'OneDOnly': [False, False, False],
-                       'yaxis_label': ['$B$','$E$','$J$','$B$', '$V_i$', '$V_e$'],
+                       'yaxis_label': ['$B$','$E$','$J$','$B$', '$V_i$', '$V_e$',
+                                       r'$|B|$', r'$|B|^2$', r'$|E|$', r'$|E|^2$',
+                                       r'$\mathbf{E}\cdot\mathbf{J}$'],
                        '2D_label': [[r'$B_x$',r'$B_y$',r'$B_z$'],
                                     [r'$E_x$',r'$E_y$',r'$E_z$'],
                                     [r'$J_x$',r'$J_y$',r'$J_z$'],
                                     [r'$B_\mathrm{tot}$',r'$B_\mathrm{tot}$',r'$B_\mathrm{tot}$'],
                                     [r'$V_{i,x}$',r'$V_{i,y}$',r'$V_{i,z}$'],
-                                    [r'$V_{e,x}$',r'$V_{e,y}$',r'$V_{e,z}$']],
+                                    [r'$V_{e,x}$',r'$V_{e,y}$',r'$V_{e,z}$'],
+                                    [r'$|B|$']*3, [r'$|B|^2$']*3, [r'$|E|$']*3, [r'$|E|^2$']*3,
+                                    [r'$\mathbf{E}\cdot\mathbf{J}$']*3],
                        '1D_label': [[r'$B_x$',r'$B_y$',r'$B_z$'],
                                     [r'$E_x$',r'$E_y$',r'$E_z$'],
                                     [r'$J_x$',r'$J_y$',r'$J_z$'],
                                     [r'$B_\mathrm{tot}$',r'$B_\mathrm{tot}$',r'$B_\mathrm{tot}$'],
                                     [r'$V_{i,x}$',r'$V_{i,y}$',r'$V_{i,z}$'],
-                                    [r'$V_{e,x}$',r'$V_{e,y}$',r'$V_{e,z}$']],
+                                    [r'$V_{e,x}$',r'$V_{e,y}$',r'$V_{e,z}$'],
+                                    [r'$|B|$']*3, [r'$|B|^2$']*3, [r'$|E|$']*3, [r'$|E|^2$']*3,
+                                    [r'$\mathbf{E}\cdot\mathbf{J}$']*3],
                        'show_x' : 1,
                        'show_y' : 1,
                        'show_z' : 1,
@@ -117,6 +140,14 @@ class FieldsPanel:
     def set_plot_keys(self):
         '''A helper function that will insure that each hdf5 file will only be
         opened once per time step'''
+        # Label lists loaded from views saved before a field type existed are
+        # too short, so fill in the missing entries from the defaults.
+        for key in ('yaxis_label', '2D_label', '1D_label'):
+            labels = self.GetPlotParam(key)
+            default = self.plot_param_dict[key]
+            if len(labels) < len(default):
+                self.SetPlotParam(key, list(labels) + default[len(labels):], update_plot = False)
+
         # First make sure that omega_plasma & xi is loaded so we can fix the
         # x & y distances.
 
@@ -134,6 +165,13 @@ class FieldsPanel:
                 self.arrs_needed.append('ey')
             if self.GetPlotParam('show_z'):
                 self.arrs_needed.append('ez')
+
+        if self.GetPlotParam('field_type') in MAGNITUDE_TYPES: # |B|, |B|^2, |E|, |E|^2
+            prefix = MAGNITUDE_TYPES[self.GetPlotParam('field_type')][0]
+            self.arrs_needed = ['c_omp', 'istep', prefix+'x', prefix+'y', prefix+'z']
+
+        if self.GetPlotParam('field_type') == EDOTJ_TYPE: # E.J
+            self.arrs_needed = ['c_omp', 'istep', 'ex', 'ey', 'ez', 'jx', 'jy', 'jz']
 
         if self.GetPlotParam('field_type') == 2: # Load the currents
             self.arrs_needed = ['c_omp', 'istep', 'jx']
@@ -212,9 +250,9 @@ class FieldsPanel:
             self.xaxis_values = self.parent.DataDict['xaxis_values']
         else:
             # x-values haven't been calculated yet, generate them then save them to the dictionary for later.
-            if self.GetPlotParam('field_type') ==0 or self.GetPlotParam('field_type') == 3:
+            if self.GetPlotParam('field_type') in (0, 3, 6, 7):
                 self.xaxis_values = np.arange(self.FigWrap.LoadKey('bx').shape[2])/self.c_omp*self.istep
-            elif self.GetPlotParam('field_type') ==1:
+            elif self.GetPlotParam('field_type') in (1, 8, 9, EDOTJ_TYPE):
                 self.xaxis_values = np.arange(self.FigWrap.LoadKey('ex').shape[2])/self.c_omp*self.istep
             elif self.GetPlotParam('field_type') ==2:
                 self.xaxis_values = np.arange(self.FigWrap.LoadKey('jx').shape[2])/self.c_omp*self.istep
@@ -286,6 +324,24 @@ class FieldsPanel:
                 else:
                     self.fz =self.FigWrap.LoadKey('ez')
 
+
+        elif self.GetPlotParam('field_type') in MAGNITUDE_TYPES: # |B|, |B|^2, |E|, |E|^2
+            prefix, power = MAGNITUDE_TYPES[self.GetPlotParam('field_type')]
+            fsq = sum(np.square(self.FigWrap.LoadKey(prefix+c)) for c in 'xyz')
+            f0 = self.parent.b0 if prefix == 'b' else self.parent.e0
+            if power == 2:
+                self.fx = fsq
+                if self.GetPlotParam('normalize_fields'):
+                    self.fx = self.fx*f0**-2
+            else:
+                self.fx = np.sqrt(fsq)
+                if self.GetPlotParam('normalize_fields'):
+                    self.fx = self.fx*f0**-1
+            self.flagx = 2 # The magnitude is shown through the first (x) slot
+
+        elif self.GetPlotParam('field_type') == EDOTJ_TYPE: # E.J
+            self.fx = sum(self.FigWrap.LoadKey('e'+c)*self.FigWrap.LoadKey('j'+c) for c in 'xyz')
+            self.flagx = 2 # E.J is a scalar, shown through the first (x) slot
 
         elif self.GetPlotParam('field_type') == 2: # Load the currents
 
@@ -564,10 +620,8 @@ class FieldsPanel:
             self.anntext =''
             if self.plotFlag >= 0:
                 self.anntext = self.GetPlotParam('2D_label')[self.GetPlotParam('field_type')][self.plotFlag]
-                if self.GetPlotParam('field_type') ==0  and self.GetPlotParam('normalize_fields'):
-                    self.anntext +=r'$/B_0$'
-                if self.GetPlotParam('field_type') ==1  and self.GetPlotParam('normalize_fields'):
-                    self.anntext +=r'$/E_0$'
+                if self.GetPlotParam('normalize_fields'):
+                    self.anntext += norm_suffix(self.GetPlotParam('field_type'))
 
             self.TwoDan = self.axes.annotate(self.anntext,
                         xy = (0.9,.9),
@@ -732,10 +786,7 @@ class FieldsPanel:
             tmplblstr = self.GetPlotParam('yaxis_label')[self.GetPlotParam('field_type')]
 
             if self.GetPlotParam('normalize_fields'):
-                if self.GetPlotParam('field_type') ==0:
-                    tmplblstr +=r'$/B_0$'
-                elif self.GetPlotParam('field_type') ==1:
-                    tmplblstr +=r'$/E_0$'
+                tmplblstr += norm_suffix(self.GetPlotParam('field_type'))
 
             self.axes.set_ylabel(tmplblstr, labelpad = self.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.MainParamDict['AxLabelSize'])
         ####
@@ -883,10 +934,8 @@ class FieldsPanel:
             self.cax.set_extent([self.xmin, self.xmax, self.ymin, self.ymax])
             if self.plotFlag >= 0:
                 self.anntext = self.GetPlotParam('2D_label')[self.GetPlotParam('field_type')][self.plotFlag]
-                if self.GetPlotParam('field_type') ==0  and self.GetPlotParam('normalize_fields'):
-                    self.anntext +=r'$/B_0$'
-                if self.GetPlotParam('field_type') ==1  and self.GetPlotParam('normalize_fields'):
-                    self.anntext +=r'$/E_0$'
+                if self.GetPlotParam('normalize_fields'):
+                    self.anntext += norm_suffix(self.GetPlotParam('field_type'))
                 self.TwoDan.set_text(self.anntext)
             else:
                 self.TwoDan.set_text('')
@@ -1034,7 +1083,8 @@ class FieldSettings(Tk.Toplevel):
         cb.grid(row = 1, sticky = Tk.W)
 
         # the Radiobox Control to choose the Field Type
-        self.FieldList = ['B Field', 'E field', 'J [current]', 'User Defined', 'Vi (ion vel)', 'Ve (electron vel)']
+        self.FieldList = ['B Field', 'E field', 'J [current]', 'User Defined', 'Vi (ion vel)', 'Ve (electron vel)',
+                          '|B| (B magnitude)', '|B|^2', '|E| (E magnitude)', '|E|^2', 'E\u00b7J']
         self.FieldTypeVar  = Tk.IntVar()
         self.FieldTypeVar.set(self.parent.GetPlotParam('field_type'))
 
@@ -1297,10 +1347,7 @@ class FieldSettings(Tk.Toplevel):
             if not self.parent.GetPlotParam('twoD'):
                 tmplblstr = self.parent.GetPlotParam('yaxis_label')[self.FieldTypeVar.get()]
                 if self.NormFieldVar.get():
-                    if self.parent.GetPlotParam('field_type') ==0:
-                        tmplblstr +=r'$/B_0$'
-                    elif self.parent.GetPlotParam('field_type') ==1:
-                        tmplblstr +=r'$/E_0$'
+                    tmplblstr += norm_suffix(self.parent.GetPlotParam('field_type'))
 
                 self.parent.axes.set_ylabel(tmplblstr, labelpad = self.parent.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.parent.MainParamDict['AxLabelSize'])
 
@@ -1361,10 +1408,7 @@ class FieldSettings(Tk.Toplevel):
             if not self.parent.GetPlotParam('twoD'):
                 tmplblstr = self.parent.GetPlotParam('yaxis_label')[self.FieldTypeVar.get()]
                 if self.parent.GetPlotParam('normalize_fields'):
-                    if self.FieldTypeVar.get() ==0:
-                        tmplblstr +=r'$/B_0$'
-                    elif self.FieldTypeVar.get() ==1:
-                        tmplblstr +=r'$/E_0$'
+                    tmplblstr += norm_suffix(self.FieldTypeVar.get())
 
                 self.parent.axes.set_ylabel(tmplblstr, labelpad = self.parent.parent.MainParamDict['yLabelPad'], color = 'black', size = self.parent.parent.MainParamDict['AxLabelSize'])
 
@@ -1425,6 +1469,20 @@ class FieldSettings(Tk.Toplevel):
                     print(f"{self.parent.GetPlotParam('twoD') = }")
                     self.parent.linex[0].set_visible(False)
                     self.parent.anx.set_visible(False)
+                    self.parent.liney[0].set_visible(False)
+                    self.parent.any.set_visible(False)
+                    self.parent.linez[0].set_visible(False)
+                    self.parent.anz.set_visible(False)
+
+            if self.FieldTypeVar.get() in SCALAR_TYPES:
+                # A magnitude or E.J is a single quantity, shown through the x slot
+                self.ShowXVar.set(True)
+                self.ShowYVar.set(False)
+                self.ShowZVar.set(False)
+                self.parent.SetPlotParam('show_x', True, update_plot = False)
+                self.parent.SetPlotParam('show_y', False, update_plot = False)
+                self.parent.SetPlotParam('show_z', False, update_plot = False)
+                if not self.parent.GetPlotParam('twoD'):
                     self.parent.liney[0].set_visible(False)
                     self.parent.any.set_visible(False)
                     self.parent.linez[0].set_visible(False)
@@ -1497,8 +1555,8 @@ class FieldSettings(Tk.Toplevel):
                 self.parent.SetPlotParam('show_z', self.ShowZVar.get())
 
     def TxtEnter(self, e):
-        streamlines.streamlines_callback(self, update_plot=False)
-        streamlines.az_contours_callback(self, update_plot=False)
+        streamlines.streamlines_callback(self, update_plot=True)
+        streamlines.az_contours_callback(self, update_plot=True)
         self.FieldsCallback()
         self.GammaCallback()
 

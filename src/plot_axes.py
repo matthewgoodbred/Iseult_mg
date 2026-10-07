@@ -125,26 +125,84 @@ def axis_values(panel, arr, axis=None):
     return np.arange(arr.shape[FIELD_AXIS_INDEX[axis]]) / panel.c_omp * panel.istep
 
 
+def averages_lineouts(panel):
+    """Whether 1D lineouts are averaged over the viewport rather than cut through its centre."""
+    return bool(panel.parent.MainParamDict['Average1D'])
+
+
+def lineout_viewport(panel):
+    """The region of the slice plane that 1D lineouts are taken from.
+
+    A dict mapping each of the two in-plane physical axes to a (low, high)
+    range in c/omega_pe. It is the region shown by the first 2D spatial panel,
+    as recorded by MainApp before the panels are drawn, and any axis that does
+    not constrain falls back to the main window's limits or the whole domain.
+    """
+    main = panel.parent
+    shown = {axis: (low, high) for axis, low, high in getattr(main, 'lineout_viewport', None) or ()
+             if axis is not None}
+    ranges = {}
+    for axis in SLICE_PLANE_AXES[main.MainParamDict['2DSlicePlane']]:
+        low, high = shown.get(axis) or limits_for_axis(panel, axis) or full_extent(panel, axis)
+        # A view panned past the edge of the domain holds no data out there.
+        top = domain_extent(panel, axis)
+        low, high = min(max(low, 0.0), top), min(max(high, 0.0), top)
+        ranges[axis] = (min(low, high), max(low, high))
+    return ranges
+
+
+def lineout_window(panel, axis=None):
+    """The field-array indices a 1D lineout along `axis` is taken over.
+
+    A dict mapping each of the two axes across the lineout to an inclusive
+    (first, last) index range. An axis in the slice plane is cut through the
+    centre of the viewport, or spans the whole of it when lineouts are
+    averaged; the axis out of the plane is held at the plane's own slice, so
+    the lineout always lies in the plane the 2D panels show.
+    """
+    axis = plot_axis_name(panel) if axis is None else axis
+    main = panel.parent
+    ranges = lineout_viewport(panel)
+    average = averages_lineouts(panel)
+    scale = panel.c_omp / panel.istep  # indices per c/omega_pe
+    window = {}
+    for other in FIELD_AXIS_INDEX:
+        if other == axis:
+            continue
+        if other not in ranges:
+            index = getattr(main, other + 'Slice', 0)
+            window[other] = (index, index)
+            continue
+        low, high = ranges[other]
+        center = int(np.around(0.5 * (low + high) * scale))
+        first, last = int(np.ceil(low * scale - 1e-9)), int(np.floor(high * scale + 1e-9))
+        top = {'x': main.MaxXInd, 'y': main.MaxYInd, 'z': main.MaxZInd}[other]
+        first, last, center = (min(max(i, 0), top) for i in (first, last, center))
+        if not average or last < first:
+            # A window narrower than a cell holds only its nearest node.
+            first = last = center
+        window[other] = (first, last)
+    return window
+
+
 def lineout(panel, arr, axis=None):
     """A 1D cut along `axis` through a (z, y, x) field array.
 
-    Honours the main 'Average1D' setting, in which case the array is averaged
-    over the two axes that are not plotted rather than sliced at the transverse
-    slice locations picked in the settings panel.
+    The cut is taken across the region the 2D panels show, see lineout_window:
+    through its centre, or averaged over it when the main 'Average1D' setting
+    is on.
     """
     axis = plot_axis_name(panel) if axis is None else axis
     arr = np.asanyarray(arr)
     if arr.ndim == 1:
         # A user defined function is allowed to hand back a 1D array.
         return arr
-    if panel.parent.MainParamDict['Average1D']:
-        kept = FIELD_AXIS_INDEX[axis]
-        return np.average(arr, axis=tuple(i for i in range(arr.ndim) if i != kept))
-    if axis == 'x':
-        return arr[_clip(panel.parent.zSlice, arr.shape[0]),
-                   _clip(panel.parent.ySlice, arr.shape[1]), :]
-    return arr[_clip(panel.parent.zSlice, arr.shape[0]), :,
-               _clip(panel.parent.xSlice, arr.shape[2])]
+    kept = FIELD_AXIS_INDEX[axis]
+    index = [slice(None)] * arr.ndim
+    for other, (first, last) in lineout_window(panel, axis).items():
+        dim = FIELD_AXIS_INDEX[other]
+        index[dim] = slice(_clip(first, arr.shape[dim]), _clip(last, arr.shape[dim]) + 1)
+    return np.mean(arr[tuple(index)], axis=tuple(i for i in range(arr.ndim) if i != kept))
 
 
 def two_d_slice(panel, arr):
@@ -165,12 +223,11 @@ def two_d_slice(panel, arr):
 def slice_location(panel, axis=None):
     """Where, in c/omega_pe, the 1D cut along `axis` is taken from.
 
-    A cut along x is taken at the chosen y (and z) slice, a cut along y is
-    taken at the chosen x (and z) slice.
+    A cut along x is centred on the y of the viewport, a cut along y on its x.
     """
     axis = plot_axis_name(panel) if axis is None else axis
-    index = panel.parent.ySlice if axis == 'x' else panel.parent.xSlice
-    return index / panel.c_omp * panel.istep
+    first, last = lineout_window(panel, axis)['y' if axis == 'x' else 'x']
+    return 0.5 * (first + last) / panel.c_omp * panel.istep
 
 
 ####

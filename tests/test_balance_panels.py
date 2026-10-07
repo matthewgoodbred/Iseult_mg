@@ -7,6 +7,7 @@ matplotlib.use('Agg')
 import matplotlib.gridspec as gridspec
 import numpy as np
 import pytest
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
 import data_loading
@@ -101,7 +102,10 @@ def test_ohms_law_panel_draws(run, params):
 @pytest.mark.parametrize('run', ['v1', 'v2'])
 @pytest.mark.parametrize('params', [{}, {'mode': 1}, {'species': 3, 'split_pressure': True},
                                     {'mode': 1, 'force_terms': 'none', 'stress_terms': 'p_xx,total', 'species': 3},
-                                    {'time_deriv': True, 'component': 1}])
+                                    {'time_deriv': True, 'component': 1},
+                                    {'integrate': True, 'species': 3, 'split_pressure': True},
+                                    {'integrate': True, 'component': 1, 'force_terms': ','.join(
+                                        PressureBalancePanel.TERM_NAMES)}])
 def test_pressure_balance_panel_draws(run, params):
     graph = run_panel(run, PressureBalancePanel, **params)
     keys = [s[0] for s in graph.series]
@@ -110,6 +114,8 @@ def test_pressure_balance_panel_draws(run, params):
     else:
         assert 'residual' in keys and 'mag_pressure' in keys
     assert len(graph.lines) == len(graph.series)
+    # the legend's labels are valid mathtext
+    FigureCanvasAgg(graph.figure).draw()
 
 
 def test_average_1d_drops_the_transverse_stencil():

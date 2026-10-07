@@ -185,11 +185,17 @@ class SubPlotWrapper:
         # First check if the current plot has a color bar
         tmpIs2D = self.PlotParamsDict[self.chartType]['twoD']
 
+        # The settings tab is open if the change came from it, and should stay so
+        had_settings = getattr(self.graph, 'settings_window', None) is not None
+
         # Change the graph type
         self.chartType = str_arg
         # put a list of the previous chart types in iseult
 
         self.graph = self.PlotTypeDict[self.chartType](self.parent, self)
+        if had_settings:
+            # The caller closes the old graph's tab right after this returns
+            self.graph.OpenSettings()
 
         # If the graph changes from 1D or 2D, we need to save this
         if tmpIs2D != self.PlotParamsDict[self.chartType]['twoD']:
@@ -1216,9 +1222,9 @@ class SettingsFrame(Tk.Toplevel):
         self.xSliceVarC_omp = Tk.StringVar()
         self.xSliceVarC_omp.set(self.units_listx[self.xSliceVar.get()])
 
-        # The x-slice fixes where a lineout plotted against y is taken from,
-        # as well as the 2D y-z plane.
-        labelx = ttk.Label(framex, text='x-slice (y lineouts)')#
+        # The x-slice is where the 2D y-z plane is cut. Lineouts are taken
+        # across the 2D viewport instead, see plot_axes.lineout_window.
+        labelx = ttk.Label(framex, text='x-slice')#
         labelx.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
 
 
@@ -1238,7 +1244,7 @@ class SettingsFrame(Tk.Toplevel):
         self.sliderx.bind("<ButtonRelease-1>", self.xUpdateValue)
 
 
-        framex.grid(row = 13, columnspan =4)
+        self.framex = framex
 
         framey = ttk.Frame(frm)
         self.ySliceVar = Tk.IntVar()
@@ -1250,9 +1256,8 @@ class SettingsFrame(Tk.Toplevel):
         self.ySliceVarC_omp = Tk.StringVar()
         self.ySliceVarC_omp.set(self.units_listy[self.ySliceVar.get()])
 
-        # The y-slice fixes where a lineout plotted against x is taken from,
-        # as well as the 2D x-z plane.
-        labely = ttk.Label(framey, text='y-slice (x lineouts)')#
+        # The y-slice is where the 2D x-z plane is cut.
+        labely = ttk.Label(framey, text='y-slice')#
         labely.pack(side=Tk.LEFT, fill=Tk.BOTH, expand=0)
 
 
@@ -1272,7 +1277,7 @@ class SettingsFrame(Tk.Toplevel):
         self.slidery.bind("<ButtonRelease-1>", self.yUpdateValue)
 
 
-        framey.grid(row = 14, columnspan =4)
+        self.framey = framey
 
         framez = ttk.Frame(frm)
         self.zSliceVar = Tk.IntVar()
@@ -1304,7 +1309,9 @@ class SettingsFrame(Tk.Toplevel):
             self.sliderz.state(['disabled'])
 
 
-        framez.grid(row = 15, columnspan =4)
+        self.framez = framez
+        # Only the slider for the axis across the 2D plane is shown.
+        self.GridPlaneSlider()
 
         cb = ttk.Checkbutton(frm, text = "Show Title",
                         variable = self.TitleVar)
@@ -1339,10 +1346,17 @@ class SettingsFrame(Tk.Toplevel):
                                 variable = self.ConstantShockVar)
         cb.grid(row = 16, column = 2, sticky = Tk.W)
 
+        # 1D lineouts are taken across the region the 2D panels show:
+        # through its centre, or averaged over all of it.
         self.Average1DVar = Tk.IntVar()
         self.Average1DVar.set(self.parent.MainParamDict['Average1D'])
         self.Average1DVar.trace('w', self.AverageChanged)
-        ttk.Checkbutton(frm, text='1D Average',variable = self.Average1DVar).grid(row = 17, column = 2, sticky = Tk.W)
+        frame1d = ttk.Frame(frm)
+        ttk.Label(frame1d, text='1D lineouts across the 2D view:').pack(side=Tk.LEFT, expand=0)
+        for value, text in ((0, 'center'), (1, 'average')):
+            ttk.Radiobutton(frame1d, text=text, variable=self.Average1DVar,
+                            value=value).pack(side=Tk.LEFT, expand=0)
+        frame1d.grid(row = 14, columnspan = 4)
 
         self.CbarOrientation = Tk.IntVar()
         self.CbarOrientation.set(self.parent.MainParamDict['HorizontalCbars'])
@@ -1506,10 +1520,19 @@ class SettingsFrame(Tk.Toplevel):
             pass
         else:
             self.parent.MainParamDict['2DSlicePlane'] = self.PlaneVar.get()
+            self.GridPlaneSlider()
             # Which panels share an axis depends on the plane, and a redraw
             # also retries any panel the last plane could not show.
             self.parent.RenewCanvas(ForceRedraw = True)
 
+
+    def GridPlaneSlider(self):
+        '''Show the slider that moves the 2D plane along the axis across it.'''
+        frames = (self.framez, self.framey, self.framex) # indexed by '2DSlicePlane'
+        # All are taken out first, so the one shown never shares its cell.
+        for frame in frames:
+            frame.grid_remove()
+        frames[self.PlaneVar.get()].grid(row = 13, columnspan = 4)
 
     def LinkKChanged(self, *args):
         # If the shared axes are changed, the whole plot must be redrawn
@@ -1707,13 +1730,13 @@ class SettingsFrame(Tk.Toplevel):
                 self.zSliceVar.set(self.parent.MaxZInd)
             self.zSliceVarC_omp.set(self.units_listz[self.zSliceVar.get()])
             if self.zSliceVar.get() != int(np.around(self.parent.MainParamDict['zSlice']*self.parent.MaxZInd)):
-                self.parent.MainParamDict['zSlice'] = float(self.OneDSliceVar.get())/self.parent.MaxZInd
+                self.parent.MainParamDict['zSlice'] = float(self.zSliceVar.get())/self.parent.MaxZInd
                 self.sliderz.set(self.zSliceVar.get())
                 to_reload += True
 
         except ValueError:
             #if they type in random stuff, just set it to the param value
-            self.TwoDSliceVarC_omp.set(self.units_list2D[self.TwoDSliceVar.get()])
+            self.zSliceVarC_omp.set(self.units_listz[self.zSliceVar.get()])
         return to_reload
 
 
@@ -2755,6 +2778,8 @@ class MainApp:
             self.SavedImgStr = {}
             self.SavedImgSize = {}
             self.diff_from_home = []
+            self.saved_views = {}
+            self.spatial_view = {}
 
 
             self.TotalEnergyTimeSteps = []
@@ -3051,10 +3076,23 @@ class MainApp:
 
     def MakePrevCtypeList(self):
         self.prev_ctype_list = []
+        # The panels as they were just drawn, so the next SaveView can read
+        # each one's zoom even if its wrapper has since been given a new graph.
+        self.drawn_panels = []
         for i in range(self.MainParamDict['NumOfRows']):
             tmp_ctype_l = []
             for j in range(self.MainParamDict['NumOfCols']):
-                tmp_ctype_l.append(str(self.SubPlotList[i][j].chartType))
+                subplot = self.SubPlotList[i][j]
+                tmp_ctype_l.append(str(subplot.chartType))
+                axes = getattr(subplot.graph, 'axes', None)
+                if axes is None or subplot.draw_failed:
+                    continue
+                horiz, vert = plot_axes.plot_axes_of(subplot.graph)
+                self.drawn_panels.append({'pos': (i, j), 'axes': axes,
+                                          'ctype': str(subplot.chartType),
+                                          'twoD': bool(subplot.GetPlotParam('twoD')),
+                                          'axis_names': (horiz, vert),
+                                          'linked': self.ShouldLinkSpatial(subplot)})
             self.prev_ctype_list.append(tmp_ctype_l)
 
     def SaveLLoc(self):
@@ -3124,145 +3162,105 @@ class MainApp:
 
     """
     def SaveView(self):
-        # A function that will make sure our view will stay the same as the
-        # plot updates.
+        '''Read out what the user has zoomed into before the figure is renewed.
 
-        cur_view = []
-        for ax, (view, (pos_orig, pos_active)) in self.toolbar._nav_stack().items():
-            #print(type(ax))
-            if ax in self.cbarList:
-                continue
-            cur_view.append(view)
-        #    Go to the home view
+        Zooms are remembered two ways. self.saved_views holds each panel's
+        own limits by its place in the grid, for the axes that are not spatial
+        (the value axis of a lineout, the momentum axis of a phase plot) and
+        for panels that do not share their spatial axes. self.spatial_view
+        holds the zoom in each physical coordinate, taken from the panels
+        that do share theirs, so that it carries over to whichever panels
+        show that coordinate after the redraw, however the grid or the chart
+        types have changed in the meantime.'''
+        cur_view = {ax: view for ax, (view, _pos) in self.toolbar._nav_stack().items()}
         self.toolbar._nav_stack.home()
-        #self.toolbar.home()
-        home_view = []
-        for ax, (view, (pos_orig, pos_active)) in self.toolbar._nav_stack().items():
-            #print(type(ax))
-            if ax in self.cbarList:
+        home_view = {ax: view for ax, (view, _pos) in self.toolbar._nav_stack().items()}
+
+        self.saved_views = {}
+        self.spatial_view = {}
+        self.diff_from_home = []
+        for panel in getattr(self, 'drawn_panels', []):
+            ax = panel['axes']
+            if ax not in cur_view or ax not in home_view:
                 continue
-            home_view.append(view)
-        #home_view =  list(self.toolbar._nav_stack.__call__())
+            cur_lims = view_limits(cur_view[ax])
+            home_lims = view_limits(home_view[ax])
+            is_changed = [home_lims[n] - cur_lims[n] != 0.0 for n in range(4)]
+            self.saved_views[panel['pos']] = dict(panel, lims = cur_lims, is_changed = is_changed)
 
-            #print(view, pos_orig)
-            # Find cbars
-            #self.FindCbars(prev=True)
-            # Filter out the colorbar axes
-            #print(self.IsCbarList)
-        try:
-            self.is_changed_list = []
-            self.diff_from_home = []
-            self.old_views = []
-            if cur_view is not None:
-                for i in range(len(cur_view)):
-                    is_changed =[]
-                    diff_list = []
-                    home_lims = view_limits(home_view[i])
-                    cur_lims = view_limits(cur_view[i])
-                    for j in range(4):
-                        num_changed = home_lims[j]-cur_lims[j] != 0.0
-                        is_changed.append(num_changed)
-                        if num_changed:
-                            if self.MainParamDict['xLimsRelative'] and j < 2:
-                                #define the difference relative to the shock loc
-                                diff_list.append(cur_lims[j]-self.shock_loc)
-                            else:
-                                # define the difference relative to the home loc
-                                diff_list.append(cur_lims[j])
+            diff_list = []
+            for n in range(4):
+                if not is_changed[n]:
+                    # A string, so that a zoom whose edge sits exactly on the
+                    # shock still hashes differently from no zoom at all.
+                    diff_list.append('n/a')
+                elif self.MainParamDict['xLimsRelative'] and n < 2:
+                    diff_list.append(cur_lims[n]-self.shock_loc)
+                else:
+                    diff_list.append(cur_lims[n])
+            self.diff_from_home.append((panel['pos'], tuple(diff_list)))
 
-                        else:
-                            # They haven't zoomed in, diff should be zero,
-                            # but I'm making it a string so cur_view-shock_loc can be
-                            # equal to zero and the hash still distinguish between the two cases.
-                            diff_list.append('n/a')
-
-
-                    self.is_changed_list.append(is_changed)
-                    self.old_views.append(cur_view[i])
-                    self.diff_from_home.append(diff_list)
-
-        except IndexError:
-            pass
+            if panel['linked']:
+                for slot, axis in zip((0, 2), panel['axis_names']):
+                    if axis is not None and (is_changed[slot] or is_changed[slot+1]):
+                        self.spatial_view.setdefault(axis, (cur_lims[slot], cur_lims[slot+1]))
 
     def LoadView(self):
-
-        #self.toolbar._nav_stack.clear()
-        #self.toolbar.home()
-        #self.set_history_buttons()
-        #self.toolbar._nav_stack.home()
-        #self.toolbar.set_history_buttons()
-        #self.toolbar._update_view()
-
-        #self._update_view()
-
+        '''Put the zoom SaveView read out back onto the renewed panels.'''
         self.toolbar.push_current()
+        cur_view = {ax: view for ax, (view, _pos) in self.toolbar._nav_stack().items()}
+        saved_views = getattr(self, 'saved_views', {})
+        spatial_view = getattr(self, 'spatial_view', {})
+        # How far a shock-relative x zoom has to move to follow the shock.
+        shock_shift = self.MainParamDict['xLimsRelative']*(self.shock_loc-self.prev_shock_loc)
 
-        cur_view = []
-        tmpList = []
-        for ax, (view, (pos_orig, pos_active)) in self.toolbar._nav_stack().items():
+        for i in range(self.MainParamDict['NumOfRows']):
+            for j in range(self.MainParamDict['NumOfCols']):
+                subplot = self.SubPlotList[i][j]
+                ax = getattr(subplot.graph, 'axes', None)
+                if subplot.draw_failed or ax is None or ax not in cur_view:
+                    subplot.Changedto1D = subplot.Changedto2D = False
+                    continue
+                lims = list(view_limits(cur_view[ax]))
+                # Which of the four limits come from the user's own zoom
+                # rather than from the panel that was just drawn.
+                kept = [False, False, False, False]
+                axis_names = plot_axes.plot_axes_of(subplot.graph)
 
-            tmpList.append(view)
-            if ax in self.cbarList:
-                continue
+                saved = saved_views.get((i, j))
+                try:
+                    prev_ctype = self.prev_ctype_list[i][j]
+                except (AttributeError, IndexError):
+                    prev_ctype = None
+                if saved is not None and prev_ctype == subplot.chartType \
+                        and saved['ctype'] == subplot.chartType \
+                        and saved['twoD'] == bool(subplot.GetPlotParam('twoD')) \
+                        and saved['axis_names'] == axis_names:
+                    # The same plot as before, so all of its zoom still applies.
+                    for n in range(4):
+                        if saved['is_changed'][n]:
+                            kept[n] = True
+                            lims[n] = saved['lims'][n]
 
-            cur_view.append(view)
-            #ax._set_view(view)
-            #self.toolbar._update_view()
-        # Find the cbars in the current plot
-        #self.FindCbars()
-        try:
-            # put the parts that have changed from the old view
-            # into the proper place in the next view
-            m = 0 # a counter that allows us to go from labeling the plots in [i][j] to 1d
-            k = 0 # a counter that skips over the colorbars
-            for i in range(self.MainParamDict['NumOfRows']):
-                for j in range(self.MainParamDict['NumOfCols']):
-                    tmp_old_view = list(view_limits(self.old_views.pop(0)))
-                    tmp_new_view = list(view_limits(cur_view[k]))
-                    # Which of the four limits end up coming from the user's
-                    # own zoom rather than from the panel that was just drawn.
-                    kept = [False, False, False, False]
-                    if self.prev_ctype_list[i][j] == self.SubPlotList[i][j].chartType:
-                        # see if the view has changed from the home view
-                        is_changed = self.is_changed_list[m]
-                        if self.SubPlotList[i][j].Changedto2D or self.SubPlotList[i][j].Changedto1D:
-                            # only keep the x values if they have changed
-                            for n in range(2):
-                                if is_changed[n]:
-                                    kept[n] = True
-                                    if self.SubPlotList[i][j].PlotParamsDict[self.SubPlotList[i][j].chartType]['spatial_x']:
-                                        tmp_new_view[n] = tmp_old_view[n]+self.MainParamDict['xLimsRelative']*(self.shock_loc-self.prev_shock_loc)
-                                    else:
-                                        tmp_new_view[n] = tmp_old_view[n]
-                        else:
-                            # Keep any y or x that is changed
-                            for n in range(4):
-                                if is_changed[n]:
-                                    kept[n] = True
-                                    tmp_new_view[n] = tmp_old_view[n]
-                                    if n < 2:
-                                        if self.SubPlotList[i][j].PlotParamsDict[self.SubPlotList[i][j].chartType]['spatial_x']:
-                                            tmp_new_view[n] = tmp_old_view[n]+self.MainParamDict['xLimsRelative']*(self.shock_loc-self.prev_shock_loc)
-                                        else:
-                                            tmp_new_view[n] = tmp_old_view[n]
+                if self.ShouldLinkSpatial(subplot):
+                    # A spatial axis shows the viewport the user framed in that
+                    # coordinate, whichever panel they framed it in.
+                    for slot, axis in zip((0, 2), axis_names):
+                        if axis in spatial_view:
+                            lims[slot], lims[slot+1] = spatial_view[axis]
+                            kept[slot] = kept[slot+1] = True
 
-                    cur_view[k] = view_from_limits(cur_view[k], tmp_new_view, kept)
+                for slot, axis in zip((0, 2), axis_names):
+                    if axis == 'x':
+                        for n in (slot, slot+1):
+                            if kept[n]:
+                                lims[n] += shock_shift
 
-                    self.SubPlotList[i][j].graph.axes._set_view(cur_view[k])
-
-                    # Handle the counting of the 'views' array in matplotlib
-                    #skip over colorbar axes
-                    m += 1
-                    k += 1
-                    self.SubPlotList[i][j].Changedto1D = False
-                    self.SubPlotList[i][j].Changedto2D = False
-            self.toolbar.push_current()
-            #self.toolbar._nav_stack.push(cur_view)
-            #print(len(self.toolbar._nav_stack._elements))
-            #self.toolbar.set_history_buttons()
-            #self.toolbar._update_view()
-        except IndexError:
-            pass
+                if any(kept):
+                    ax._set_view(view_from_limits(cur_view[ax], lims, kept))
+                subplot.Changedto1D = False
+                subplot.Changedto2D = False
+        self.toolbar.push_current()
 
     def RenewCanvas(self, keep_view = True, ForceRedraw = False):
 
@@ -3378,6 +3376,7 @@ class MainApp:
             keep_view = False
         if keep_view:
             self.SaveView()
+        self.RecordLineoutViewport()
 
         # The toolbar stacks up views keyed by the axes they belong to, using
         # weak references, so every view it is still holding empties out as
@@ -3549,14 +3548,15 @@ class MainApp:
             keep_view = False
 
             self.diff_from_home = []
-            for i in range(self.MainParamDict['NumOfRows']*self.MainParamDict['NumOfCols']):
-                self.diff_from_home.append(['n/a', 'n/a', 'n/a', 'n/a'])
+            self.saved_views = {}
+            self.spatial_view = {}
 
 
         if self.NewDirectory:
             keep_view = False
         if keep_view:
             self.SaveView()
+        self.RecordLineoutViewport()
 
 
         self.toolbar._nav_stack.clear()
@@ -3889,10 +3889,16 @@ class MainApp:
                                     (vert, min(ylim), max(ylim)))
         return None
 
-    def is_viewport_zoomed(self):
-        if not hasattr(self, 'diff_from_home') or not self.diff_from_home:
-            return False
-        m = 0
+    def RecordLineoutViewport(self):
+        '''Remember the region 1D lineouts are taken across, see plot_axes.lineout_window.
+
+        It is read before any panel is drawn, while the 2D panels still show
+        the region the user was looking at: once they are redrawn their limits
+        may be the whole domain again until the view is restored.'''
+        self.lineout_viewport = None if self.NewDirectory else self.get_active_viewport()
+
+    def has_lineouts(self):
+        '''Whether any panel takes a 1D lineout across the 2D viewport.'''
         for i in range(self.MainParamDict['NumOfRows']):
             if i >= len(self.SubPlotList):
                 continue
@@ -3900,13 +3906,20 @@ class MainApp:
                 if j >= len(self.SubPlotList[i]):
                     continue
                 subplot = self.SubPlotList[i][j]
-                if subplot.chartType in ['FieldsPlot', 'DensityPlot', 'MagPlots', 'Moments']:
-                    if subplot.graph and subplot.graph.GetPlotParam('twoD'):
-                        if m < len(self.diff_from_home):
-                            if any(val != 'n/a' for val in self.diff_from_home[m]):
-                                return True
-                m += 1
+                if subplot.draw_failed or not subplot.graph:
+                    continue
+                if subplot.chartType in ('OhmsLaw', 'PressureBalance', 'FFTPlots'):
+                    return True
+                if subplot.chartType in ('FieldsPlot', 'DensityPlot', 'MagPlots') \
+                        and not subplot.graph.GetPlotParam('twoD'):
+                    return True
         return False
+
+    def is_viewport_zoomed(self):
+        '''Whether the user has zoomed into any spatial coordinate.'''
+        return bool(getattr(self, 'spatial_view', None)) or any(
+            any(saved['is_changed']) for saved in getattr(self, 'saved_views', {}).values()
+            if saved['twoD'] and saved['ctype'] in ('FieldsPlot', 'DensityPlot', 'MagPlots', 'Moments'))
 
     def on_draw(self, event):
         '''Keep the shared axes lined up after an interactive zoom or pan.
@@ -3930,6 +3943,12 @@ class MainApp:
             self._aligning = False
 
     def on_release(self, event):
+        pending = getattr(self, '_pending_click', None)
+        self._pending_click = None
+        if pending is not None and event.button == pending[3]:
+            x, y, t, _ = pending
+            if time.time() - t < 0.4 and abs(event.x - x) < 5 and abs(event.y - y) < 5:
+                self._open_clicked_settings(event)
         # Defer limit check slightly to let toolbar updates complete
         self.after(100, self.check_limits_and_renew)
 
@@ -3951,16 +3970,17 @@ class MainApp:
                 if has_viewport_phase_plot:
                     break
 
-        if not has_viewport_phase_plot:
-            return
-
         # Get current active viewport
         viewport = self.get_active_viewport()
         if viewport is None:
             return
 
-        # Compare with the last used viewport for phase plots
-        if not hasattr(self, 'last_phase_viewport') or self.last_phase_viewport != viewport:
+        # Compare with the last used viewport for phase plots, and with the
+        # one the lineouts were cut across
+        if has_viewport_phase_plot and \
+                (not hasattr(self, 'last_phase_viewport') or self.last_phase_viewport != viewport):
+            self.RenewCanvas(keep_view=True)
+        elif getattr(self, 'lineout_viewport', None) != viewport and self.has_lineouts():
             self.RenewCanvas(keep_view=True)
 
     def onclick(self, event):
@@ -3973,20 +3993,28 @@ class MainApp:
         if not event.inaxes:
             pass
         if event.button == 1:
-            pass
-        else:
-            fig_size = self.f.get_size_inches()*self.f.dpi # Fig size in px
+            return
+        # In pan/zoom mode a right-drag zooms, so only a brief click without
+        # movement (judged on release) may open the settings
+        mode = getattr(self.toolbar, 'mode', '')
+        if getattr(mode, 'value', mode):
+            self._pending_click = (event.x, event.y, time.time(), event.button)
+            return
+        self._open_clicked_settings(event)
 
-            x_loc = event.x/fig_size[0] # The relative x position of the mouse in the figure
-            y_loc = event.y/fig_size[1] # The relative y position of the mouse in the figure
+    def _open_clicked_settings(self, event):
+        fig_size = self.f.get_size_inches()*self.f.dpi # Fig size in px
 
-            sub_plots = self.gs0.get_grid_positions(self.f)
-            row_array = np.sort(np.append(sub_plots[0], sub_plots[1]))
-            col_array = np.sort(np.append(sub_plots[2], sub_plots[3]))
-            i = int((len(row_array)-row_array.searchsorted(y_loc))/2)
-            j = int(col_array.searchsorted(x_loc)//2)
+        x_loc = event.x/fig_size[0] # The relative x position of the mouse in the figure
+        y_loc = event.y/fig_size[1] # The relative y position of the mouse in the figure
 
-            self.SubPlotList[i][j].OpenSubplotSettings()
+        sub_plots = self.gs0.get_grid_positions(self.f)
+        row_array = np.sort(np.append(sub_plots[0], sub_plots[1]))
+        col_array = np.sort(np.append(sub_plots[2], sub_plots[3]))
+        i = int((len(row_array)-row_array.searchsorted(y_loc))/2)
+        j = int(col_array.searchsorted(x_loc)//2)
+
+        self.SubPlotList[i][j].OpenSubplotSettings()
 
     def shock_finder(self):
         '''The main idea of the shock finder, is we go to the last timestep
